@@ -13,7 +13,7 @@ import { expect } from "chai";
 
 import {
   generateP256Keypair,
-  signMessage,
+  signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
   setSwigMessage,
 } from "./helpers/secp256r1";
@@ -26,14 +26,14 @@ describe("set_swig", () => {
   async function provisionVault() {
     const supabaseUserId = new Uint8Array(16);
     crypto.getRandomValues(supabaseUserId);
-    const { privateKey, publicKey } = generateP256Keypair();
+    const keypair = generateP256Keypair();
     const [vaultPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), Buffer.from(supabaseUserId)],
       program.programId
     );
     await program.methods
       .initializeVault({
-        passkeyPubkey: Array.from(publicKey),
+        passkeyPubkey: Array.from(keypair.publicKey),
         coolingOffSeconds: new BN(0),
         supabaseUserId: Array.from(supabaseUserId),
       })
@@ -43,20 +43,27 @@ describe("set_swig", () => {
         systemProgram: SystemProgram.programId,
       })
       .rpc();
-    return { vaultPda, privateKey, publicKey };
+    return { vaultPda, keypair };
   }
 
   async function buildSetSwigTx(
     vaultPda: PublicKey,
-    privateKey: Uint8Array,
-    publicKey: Uint8Array,
+    keypair: ReturnType<typeof generateP256Keypair>,
     swigAddress: PublicKey
   ): Promise<Transaction> {
-    const message = setSwigMessage(swigAddress);
-    const sig = signMessage(privateKey, message);
-    const precompileIx = buildSecp256r1VerifyInstruction(publicKey, sig, message);
+    const opMsg = setSwigMessage(swigAddress);
+    const signed = signOperationWithPasskey(keypair, opMsg);
+    const precompileIx = buildSecp256r1VerifyInstruction(
+      keypair.publicKey,
+      signed.signature,
+      signed.precompileMessage
+    );
     const vaultIx = await program.methods
-      .setSwig({ swigAddress })
+      .setSwig({
+        swigAddress,
+        clientDataJson: Buffer.from(signed.clientDataJSON),
+        authenticatorData: Buffer.from(signed.authenticatorData),
+      })
       .accounts({
         vault: vaultPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
@@ -66,10 +73,10 @@ describe("set_swig", () => {
   }
 
   it("binds the vault to a Swig address with a passkey signature", async () => {
-    const { vaultPda, privateKey, publicKey } = await provisionVault();
+    const { vaultPda, keypair } = await provisionVault();
     const swigAddress = Keypair.generate().publicKey;
 
-    const tx = await buildSetSwigTx(vaultPda, privateKey, publicKey, swigAddress);
+    const tx = await buildSetSwigTx(vaultPda, keypair, swigAddress);
     await sendAndConfirmTransaction(provider.connection, tx, [
       (provider.wallet as anchor.Wallet).payer,
     ]);
@@ -79,21 +86,23 @@ describe("set_swig", () => {
   });
 
   it("rejects re-binding when swig_address is already set (idempotent)", async () => {
-    const { vaultPda, privateKey, publicKey } = await provisionVault();
+    const { vaultPda, keypair } = await provisionVault();
     const firstSwig = Keypair.generate().publicKey;
     const secondSwig = Keypair.generate().publicKey;
 
-    const tx1 = await buildSetSwigTx(vaultPda, privateKey, publicKey, firstSwig);
-    await sendAndConfirmTransaction(provider.connection, tx1, [
-      (provider.wallet as anchor.Wallet).payer,
-    ]);
+    await sendAndConfirmTransaction(
+      provider.connection,
+      await buildSetSwigTx(vaultPda, keypair, firstSwig),
+      [(provider.wallet as anchor.Wallet).payer]
+    );
 
-    const tx2 = await buildSetSwigTx(vaultPda, privateKey, publicKey, secondSwig);
     let threw = false;
     try {
-      await sendAndConfirmTransaction(provider.connection, tx2, [
-        (provider.wallet as anchor.Wallet).payer,
-      ]);
+      await sendAndConfirmTransaction(
+        provider.connection,
+        await buildSetSwigTx(vaultPda, keypair, secondSwig),
+        [(provider.wallet as anchor.Wallet).payer]
+      );
     } catch (err: any) {
       threw = true;
       expect(String(err)).to.match(/PasskeyVerificationFailed/);

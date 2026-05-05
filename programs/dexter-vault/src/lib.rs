@@ -42,7 +42,8 @@ pub mod dexter_vault {
 
     pub fn finalize_withdrawal(
         ctx: Context<FinalizeWithdrawal>,
+        args: FinalizeWithdrawalArgs,
     ) -> Result<()> {
-        instructions::finalize_withdrawal::handler(ctx)
+        instructions::finalize_withdrawal::handler(ctx, args)
     }
 }

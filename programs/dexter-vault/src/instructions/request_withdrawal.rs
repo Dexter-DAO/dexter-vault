@@ -17,12 +17,12 @@ pub struct RequestWithdrawal<'info> {
 pub struct RequestWithdrawalArgs {
     pub amount: u64,
     pub destination: Pubkey,
-    /// Caller-supplied timestamp that was included in the passkey-signed
-    /// message. Must match `Clock::get()?.unix_timestamp` to within a small
-    /// drift window. The user's client signed the message with this exact
-    /// value, so the on-chain handler reproduces the same bytes for the
-    /// SIMD-0075 introspection check.
     pub signed_at: i64,
+    /// WebAuthn `clientDataJSON` from the browser. Its `challenge` field
+    /// must base64url-decode to `sha256(operation_message)`.
+    pub client_data_json: Vec<u8>,
+    /// WebAuthn `authenticatorData` (37+ bytes).
+    pub authenticator_data: Vec<u8>,
 }
 
 pub fn handler(ctx: Context<RequestWithdrawal>, args: RequestWithdrawalArgs) -> Result<()> {
@@ -32,18 +32,20 @@ pub fn handler(ctx: Context<RequestWithdrawal>, args: RequestWithdrawalArgs) -> 
     let drift = now.checked_sub(args.signed_at).unwrap_or(i64::MAX).abs();
     require!(drift <= 300, VaultError::PasskeyVerificationFailed);
 
-    // Reproduce the message the passkey signed:
+    // Operation message:
     //   "request_withdrawal" || amount_le || destination_bytes || signed_at_le
-    let mut msg = Vec::with_capacity(b"request_withdrawal".len() + 8 + 32 + 8);
-    msg.extend_from_slice(b"request_withdrawal");
-    msg.extend_from_slice(&args.amount.to_le_bytes());
-    msg.extend_from_slice(args.destination.as_ref());
-    msg.extend_from_slice(&args.signed_at.to_le_bytes());
+    let mut op_msg = Vec::with_capacity(b"request_withdrawal".len() + 8 + 32 + 8);
+    op_msg.extend_from_slice(b"request_withdrawal");
+    op_msg.extend_from_slice(&args.amount.to_le_bytes());
+    op_msg.extend_from_slice(args.destination.as_ref());
+    op_msg.extend_from_slice(&args.signed_at.to_le_bytes());
 
     verify_passkey_signed(
         &ctx.accounts.instructions_sysvar,
         &vault.passkey_pubkey,
-        &msg,
+        &args.client_data_json,
+        &args.authenticator_data,
+        &op_msg,
     )?;
 
     vault.pending_withdrawal = Some(PendingWithdrawal {

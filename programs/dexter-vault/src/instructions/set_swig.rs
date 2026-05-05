@@ -16,6 +16,11 @@ pub struct SetSwig<'info> {
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct SetSwigArgs {
     pub swig_address: Pubkey,
+    /// WebAuthn `clientDataJSON` produced by the browser. Must contain a
+    /// `challenge` field equal to base64url(sha256(operation_message)).
+    pub client_data_json: Vec<u8>,
+    /// WebAuthn `authenticatorData` produced by the authenticator (37+ bytes).
+    pub authenticator_data: Vec<u8>,
 }
 
 pub fn handler(ctx: Context<SetSwig>, args: SetSwigArgs) -> Result<()> {
@@ -26,16 +31,17 @@ pub fn handler(ctx: Context<SetSwig>, args: SetSwigArgs) -> Result<()> {
         VaultError::PasskeyVerificationFailed
     );
 
-    // Reproduce the passkey-signed message:
-    //   "set_swig" || swig_address_bytes
-    let mut msg = Vec::with_capacity(b"set_swig".len() + 32);
-    msg.extend_from_slice(b"set_swig");
-    msg.extend_from_slice(args.swig_address.as_ref());
+    // Operation message: "set_swig" || swig_address_bytes
+    let mut op_msg = Vec::with_capacity(b"set_swig".len() + 32);
+    op_msg.extend_from_slice(b"set_swig");
+    op_msg.extend_from_slice(args.swig_address.as_ref());
 
     verify_passkey_signed(
         &ctx.accounts.instructions_sysvar,
         &vault.passkey_pubkey,
-        &msg,
+        &args.client_data_json,
+        &args.authenticator_data,
+        &op_msg,
     )?;
 
     vault.swig_address = args.swig_address;
