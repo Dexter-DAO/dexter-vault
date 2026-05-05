@@ -17,6 +17,7 @@ import {
   buildSecp256r1VerifyInstruction,
   requestWithdrawalMessage,
   finalizeWithdrawalMessage,
+  setSwigMessage,
 } from "./helpers/secp256r1";
 
 describe("withdrawal flow (request → cooling-off → finalize)", () => {
@@ -45,6 +46,29 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       })
       .rpc();
     return { vaultPda, privateKey, publicKey };
+  }
+
+  async function bindSwig(
+    vaultPda: PublicKey,
+    privateKey: Uint8Array,
+    publicKey: Uint8Array
+  ): Promise<PublicKey> {
+    const swigAddress = Keypair.generate().publicKey;
+    const message = setSwigMessage(swigAddress);
+    const sig = signMessage(privateKey, message);
+    const precompileIx = buildSecp256r1VerifyInstruction(publicKey, sig, message);
+    const vaultIx = await program.methods
+      .setSwig({ swigAddress })
+      .accounts({
+        vault: vaultPda,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      })
+      .instruction();
+    const tx = new Transaction().add(precompileIx, vaultIx);
+    await sendAndConfirmTransaction(provider.connection, tx, [
+      (provider.wallet as anchor.Wallet).payer,
+    ]);
+    return swigAddress;
   }
 
   async function buildRequestWithdrawalTx(
@@ -78,7 +102,8 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
     privateKey: Uint8Array,
     publicKey: Uint8Array,
     amount: bigint,
-    destination: PublicKey
+    destination: PublicKey,
+    swigAddress: PublicKey
   ): Promise<Transaction> {
     const message = finalizeWithdrawalMessage(amount, destination);
     const sig = signMessage(privateKey, message);
@@ -87,6 +112,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       .finalizeWithdrawal()
       .accounts({
         vault: vaultPda,
+        swig: swigAddress,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
       .instruction();
@@ -121,6 +147,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
 
   it("finalize_withdrawal fails when cooling-off has not elapsed", async () => {
     const { vaultPda, privateKey, publicKey } = await provisionVault(86400);
+    const swigAddress = await bindSwig(vaultPda, privateKey, publicKey);
     const destination = Keypair.generate().publicKey;
     const amount = BigInt(1_000_000);
     const signedAt = BigInt(Math.floor(Date.now() / 1000));
@@ -142,7 +169,8 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       privateKey,
       publicKey,
       amount,
-      destination
+      destination,
+      swigAddress
     );
 
     let threw = false;
@@ -159,6 +187,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
 
   it("finalize_withdrawal fails when pending vouchers exist", async () => {
     const { vaultPda, privateKey, publicKey } = await provisionVault(0);
+    const swigAddress = await bindSwig(vaultPda, privateKey, publicKey);
     const destination = Keypair.generate().publicKey;
     const amount = BigInt(1_500_000);
     const signedAt = BigInt(Math.floor(Date.now() / 1000));
@@ -175,7 +204,6 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       (provider.wallet as anchor.Wallet).payer,
     ]);
 
-    // Register a pending voucher to block finalize.
     await program.methods
       .settleVoucher({ amount: new BN(500), increment: true })
       .accounts({
@@ -189,7 +217,8 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       privateKey,
       publicKey,
       amount,
-      destination
+      destination,
+      swigAddress
     );
     let threw = false;
     try {
@@ -205,6 +234,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
 
   it("finalize_withdrawal succeeds when cooling-off elapsed and no pending vouchers", async () => {
     const { vaultPda, privateKey, publicKey } = await provisionVault(0);
+    const swigAddress = await bindSwig(vaultPda, privateKey, publicKey);
     const destination = Keypair.generate().publicKey;
     const amount = BigInt(750_000);
     const signedAt = BigInt(Math.floor(Date.now() / 1000));
@@ -226,7 +256,8 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       privateKey,
       publicKey,
       amount,
-      destination
+      destination,
+      swigAddress
     );
     await sendAndConfirmTransaction(provider.connection, finalizeTx, [
       (provider.wallet as anchor.Wallet).payer,
@@ -234,5 +265,45 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
 
     const vault = await program.account.vault.fetch(vaultPda);
     expect(vault.pendingWithdrawal).to.be.null;
+  });
+
+  it("finalize_withdrawal fails when swig not bound", async () => {
+    const { vaultPda, privateKey, publicKey } = await provisionVault(0);
+    const fakeSwig = Keypair.generate().publicKey;
+    const destination = Keypair.generate().publicKey;
+    const amount = BigInt(100_000);
+    const signedAt = BigInt(Math.floor(Date.now() / 1000));
+
+    const requestTx = await buildRequestWithdrawalTx(
+      vaultPda,
+      privateKey,
+      publicKey,
+      amount,
+      destination,
+      signedAt
+    );
+    await sendAndConfirmTransaction(provider.connection, requestTx, [
+      (provider.wallet as anchor.Wallet).payer,
+    ]);
+
+    const finalizeTx = await buildFinalizeWithdrawalTx(
+      vaultPda,
+      privateKey,
+      publicKey,
+      amount,
+      destination,
+      fakeSwig
+    );
+
+    let threw = false;
+    try {
+      await sendAndConfirmTransaction(provider.connection, finalizeTx, [
+        (provider.wallet as anchor.Wallet).payer,
+      ]);
+    } catch (err: any) {
+      threw = true;
+      expect(String(err)).to.match(/NoPendingWithdrawal|PasskeyVerificationFailed/);
+    }
+    expect(threw).to.equal(true);
   });
 });

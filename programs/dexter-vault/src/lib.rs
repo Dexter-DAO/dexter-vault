@@ -19,6 +19,13 @@ pub mod dexter_vault {
         instructions::initialize_vault::handler(ctx, args)
     }
 
+    pub fn set_swig(
+        ctx: Context<SetSwig>,
+        args: SetSwigArgs,
+    ) -> Result<()> {
+        instructions::set_swig::handler(ctx, args)
+    }
+
     pub fn settle_voucher(
         ctx: Context<SettleVoucher>,
         args: SettleVoucherArgs,

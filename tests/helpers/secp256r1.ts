@@ -16,45 +16,20 @@ const DATA_START = 2;
 
 const HALF_ORDER = BigInt(
   "0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63255"
-) >> BigInt(1); // n / 2 — p256 group order halved
+) >> BigInt(1);
 
-/**
- * Generate a fresh P-256 keypair. Returns the 32-byte private key and the
- * 33-byte SEC1 compressed public key, exactly matching the format Swig +
- * SIMD-0075 expect.
- */
 export function generateP256Keypair(): { privateKey: Uint8Array; publicKey: Uint8Array } {
   const privateKey = p256.utils.randomPrivateKey();
-  const publicKey = p256.getPublicKey(privateKey, true); // compressed = true → 33 bytes
+  const publicKey = p256.getPublicKey(privateKey, true);
   return { privateKey, publicKey };
 }
 
-/**
- * Sign `message` with the given P-256 private key, returning a 64-byte
- * compact (r||s) signature with the s value normalized to lowS form per
- * SIMD-0075's malleability mitigation.
- */
 export function signMessage(privateKey: Uint8Array, message: Uint8Array): Uint8Array {
   const messageHash = sha256(message);
   const sig = p256.sign(messageHash, privateKey, { lowS: true });
   return sig.toCompactRawBytes();
 }
 
-/**
- * Build a SIMD-0075 secp256r1 sigverify precompile instruction.
- *
- * Layout (single-signature form):
- *   [num_signatures: u8 = 1]
- *   [padding: u8 = 0]
- *   [Secp256r1SignatureOffsets: 14 bytes]
- *   [signature: 64 bytes]
- *   [pubkey: 33 bytes]
- *   [message: variable]
- *
- * All offset *_instruction_index fields are 0xFFFF meaning "current
- * instruction" — so signature/pubkey/message all live in this same
- * precompile instruction's data buffer.
- */
 export function buildSecp256r1VerifyInstruction(
   publicKey: Uint8Array,
   signature: Uint8Array,
@@ -79,14 +54,13 @@ export function buildSecp256r1VerifyInstruction(
   data[1] = 0;
 
   const view = new DataView(data.buffer);
-  // Secp256r1SignatureOffsets, all u16 LE
   view.setUint16(DATA_START + 0, signatureOffset, true);
-  view.setUint16(DATA_START + 2, 0xffff, true); // signature_instruction_index
+  view.setUint16(DATA_START + 2, 0xffff, true);
   view.setUint16(DATA_START + 4, publicKeyOffset, true);
-  view.setUint16(DATA_START + 6, 0xffff, true); // public_key_instruction_index
+  view.setUint16(DATA_START + 6, 0xffff, true);
   view.setUint16(DATA_START + 8, messageOffset, true);
   view.setUint16(DATA_START + 10, messageSize, true);
-  view.setUint16(DATA_START + 12, 0xffff, true); // message_instruction_index
+  view.setUint16(DATA_START + 12, 0xffff, true);
 
   data.set(signature, signatureOffset);
   data.set(publicKey, publicKeyOffset);
@@ -99,7 +73,6 @@ export function buildSecp256r1VerifyInstruction(
   });
 }
 
-/** Reproduce the request_withdrawal message the on-chain handler reconstructs. */
 export function requestWithdrawalMessage(
   amount: bigint,
   destination: PublicKey,
@@ -114,7 +87,6 @@ export function requestWithdrawalMessage(
   return buf;
 }
 
-/** Reproduce the finalize_withdrawal message the on-chain handler reconstructs. */
 export function finalizeWithdrawalMessage(
   amount: bigint,
   destination: PublicKey
@@ -127,5 +99,12 @@ export function finalizeWithdrawalMessage(
   return buf;
 }
 
-// HALF_ORDER export retained for any future callers; not used directly here.
+export function setSwigMessage(swigAddress: PublicKey): Uint8Array {
+  const tag = new TextEncoder().encode("set_swig");
+  const buf = new Uint8Array(tag.length + 32);
+  buf.set(tag, 0);
+  buf.set(swigAddress.toBytes(), tag.length);
+  return buf;
+}
+
 export { HALF_ORDER };
