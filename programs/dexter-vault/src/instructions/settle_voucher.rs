@@ -5,17 +5,24 @@ use crate::state::*;
 #[derive(Accounts)]
 pub struct SettleVoucher<'info> {
     #[account(mut)]
-    pub payer: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    pub vault: Account<'info, Vault>,
+    pub dexter_session_signer: Signer<'info>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct SettleVoucherArgs {
-    pub voucher_hash: [u8; 32],
-    pub voucher_amount: u64,
-    pub voucher_signature: [u8; 64],
+    pub amount: u64,
+    pub increment: bool,
 }
 
-pub fn handler(_ctx: Context<SettleVoucher>, _args: SettleVoucherArgs) -> Result<()> {
+pub fn handler(ctx: Context<SettleVoucher>, args: SettleVoucherArgs) -> Result<()> {
+    let vault = &mut ctx.accounts.vault;
+    if args.increment {
+        vault.pending_voucher_count = vault.pending_voucher_count.saturating_add(1);
+    } else {
+        require!(vault.pending_voucher_count > 0, VaultError::NoPendingWithdrawal);
+        vault.pending_voucher_count -= 1;
+    }
+    let _ = args.amount;
     Ok(())
 }
