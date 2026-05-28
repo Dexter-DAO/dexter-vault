@@ -28,7 +28,7 @@ The program **does not move funds.** USDC moves out of the buyer's Swig wallet v
 - Track a pending withdrawal intent (`pending_withdrawal`).
 - Allow a withdrawal to finalize **only** when the buyer's passkey has signed it, a cooling-off window has elapsed, **and** zero tabs are outstanding.
 
-It is ~250 lines of Rust across five instructions plus a WebAuthn verification module. Small on purpose — the entire point is that it is auditable in an afternoon.
+It is ~250 lines of Rust across five instructions plus a WebAuthn verification module. Small on purpose: a withdrawal gate is only as trustworthy as it is reviewable, so the program keeps its surface area minimal and its invariants few.
 
 Program: **`Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc`** (Solana mainnet)
 
