@@ -1,4 +1,4 @@
-# Security Model — dexter-vault
+# Security Model: dexter-vault
 
 **Program:** `Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc` (Solana mainnet)
 **Audit status:** Not yet externally audited. Funding in flight.
@@ -16,7 +16,7 @@ dexter-vault is an Anchor program that gates withdrawal from a buyer's bound Swi
 
 1. **Withdrawal gate.** The buyer's funds can only leave their bound Swig wallet after (a) the buyer's passkey signs a `request_withdrawal`, (b) a cooling-off period elapses, and (c) zero tabs are outstanding.
 2. **Bound-once Swig.** A vault's `swig_address` can be set exactly once via `set_swig`. It cannot be rebound.
-3. **Bounded session role.** Dexter's session role on the bound Swig is granted at onboarding with `tokenLimit`, `programAll`, and a TTL — these limits are enforced by the Swig program, not by dexter-vault.
+3. **Bounded session role.** Dexter's session role on the bound Swig is granted at onboarding with `tokenLimit`, `programAll`, and a TTL. These limits are enforced by the Swig program, not by dexter-vault.
 4. **Counter-based tab tracking.** `pending_voucher_count` is a counter incremented on tab open and decremented on settle. Mutation is bound to the vault's recorded `dexter_authority` via `has_one`; no other signer can move it. The counter is the load-bearing gate behind property (1).
 5. **Authority-gated counter, buyer-owned recovery.** Only the `dexter_authority` recorded at `initialize_vault` can change `pending_voucher_count` (`settle_voucher`). If that authority abandons a tab and leaves the counter stuck, the buyer's own passkey can clear it via `force_release` after a grace period. The gate can never permanently trap a buyer's funds, and the authority never gains the ability to move funds.
 
@@ -69,9 +69,9 @@ The bound Swig is created with three authorities. Understanding their separation
 
 | Role | Authority type | Actions | Held by | Can spend? |
 |---|---|---|---|---|
-| 0 | Ed25519 | `manageAuthority` only | The transaction fee payer at create time — the **facilitator** for the anonymous/guest flow, the **user's own wallet** for the authenticated flow | **No** |
+| 0 | Ed25519 | `manageAuthority` only | The transaction fee payer at create time, the **facilitator** for the anonymous/guest flow, the **user's own wallet** for the authenticated flow | **No** |
 | 1 | ProgramExec (dexter-vault, marker = `finalize_withdrawal` discriminator) | `all` | The dexter-vault program | Only via `finalize_withdrawal` (passkey-gated) |
-| 2 | Ed25519Session (`DEXTER_SESSION_MASTER_KEY`) | `tokenLimit` + `programAll`, TTL | Dexter (facilitator) | Yes — bounded by Swig-enforced cap + TTL |
+| 2 | Ed25519Session (`DEXTER_SESSION_MASTER_KEY`) | `tokenLimit` + `programAll`, TTL | Dexter (facilitator) | Yes, bounded by Swig-enforced cap + TTL |
 
 **Why role 0 exists.** The Swig SDK requires that any action performed *by* a ProgramExec authority (including `addAuthority`) be accompanied by a sibling instruction matching the registered marker. That is correct for withdrawals (`finalize_withdrawal` is the sibling) but impossible during enrollment, where no withdrawal exists yet. Role 0 is a plain Ed25519 `manageAuthority` authority that bootstraps the Swig and adds roles 1 and 2 atomically in the create transaction, with no marker sibling required. It is also the authority used to **re-grant the session role** (role 2) after its TTL lapses.
 
@@ -79,7 +79,7 @@ The bound Swig is created with three authorities. Understanding their separation
 
 **Custody implication.** Funds leave the Swig only via (1) the user's passkey through the vault's `finalize_withdrawal` path (role 1, subject to cooling-off + the voucher gate) or (2) Dexter's capped/TTL'd session role (role 2). Role 0's authority-management power does not include spend, so the non-custodial property in §2.3 is preserved.
 
-**Asymmetry between flows — noted as a trust difference:** in the **anonymous/guest flow** the facilitator holds role 0 (the manageAuthority key), because a brand-new agent has no key of its own to fee-pay or sign the create transaction. A compromised facilitator key could therefore add or remove authorities on a guest Swig — but still could not directly spend (no spend permission on role 0). In the **authenticated flow** role 0 is the user's own wallet, so authority management on that Swig is fully self-sovereign. The guest-flow facilitator-held manageAuthority is an accepted tradeoff of zero-account onboarding; it is bounded (no spend) and tracked here for completeness.
+**Asymmetry between flows, noted as a trust difference:** in the **anonymous/guest flow** the facilitator holds role 0 (the manageAuthority key), because a brand-new agent has no key of its own to fee-pay or sign the create transaction. A compromised facilitator key could therefore add or remove authorities on a guest Swig, but still could not directly spend (no spend permission on role 0). In the **authenticated flow** role 0 is the user's own wallet, so authority management on that Swig is fully self-sovereign. The guest-flow facilitator-held manageAuthority is an accepted tradeoff of zero-account onboarding; it is bounded (no spend) and tracked here for completeness.
 
 ---
 
@@ -127,14 +127,14 @@ pub struct PendingWithdrawal {
          │
    ┌─────┴──────────────────────────┬──────────────────────┐
    │ settle_voucher(+1)             │ request_withdrawal   │
-   │ (Dexter session signer)        │ (passkey-signed)     │
+   │ (dexter_authority, has_one)    │ (passkey-signed)     │
    ▼                                ▼                      │
 ┌─────────────────────┐         ┌─────────────────────┐    │
 │   bound, tabs open  │         │   bound, idle,      │    │
 │   count >= 1        │         │   withdrawal queued │◄───┘
 └────────┬────────────┘         └────────┬────────────┘
          │ settle_voucher(-1)            │ finalize_withdrawal
-         │ (Dexter session signer)       │ (passkey-signed,
+         │ (dexter_authority, has_one)   │ (passkey-signed,
          │                               │  REQUIRES count==0
          │                               │  AND cooling-off ≥ N)
          │                               ▼
@@ -160,9 +160,9 @@ pub struct PendingWithdrawal {
 **Security checks:**
 - `passkey_pubkey[0] == 0x02 || 0x03` (valid SEC1 compressed P-256 encoding)
 - `cooling_off_seconds >= 0`
-- PDA derivation: `seeds = [b"vault", supabase_user_id]` — one vault per Supabase user ID.
+- PDA derivation: `seeds = [b"vault", supabase_user_id]`, one vault per Supabase user ID.
 
-**Threat: bind to attacker's passkey.** An attacker calling `initialize_vault` with their own passkey before the legitimate user does will create a vault under their control. This is mitigated *off-chain* by the facilitator/dexter-api flow: legitimate vault creation happens within the authenticated `/api/passkey-vault` flow, which derives the Supabase user ID from a verified session. An attacker would need to (a) compromise the user's Supabase session, or (b) race the legitimate initialization. The on-chain program itself does not prevent this — it relies on the off-chain flow controlling who calls `initialize_vault` for which `supabase_user_id`.
+**Threat: bind to attacker's passkey.** An attacker calling `initialize_vault` with their own passkey before the legitimate user does will create a vault under their control. This is mitigated *off-chain* by the facilitator/dexter-api flow: legitimate vault creation happens within the authenticated `/api/passkey-vault` flow, which derives the Supabase user ID from a verified session. An attacker would need to (a) compromise the user's Supabase session, or (b) race the legitimate initialization. The on-chain program itself does not prevent this; it relies on the off-chain flow controlling who calls `initialize_vault` for which `supabase_user_id`.
 
 **Mitigation gap:** consider adding an `initializer_pubkey` constraint or a setup-authority allowlist to the program if the off-chain controls are deemed insufficient.
 
@@ -174,14 +174,14 @@ pub struct PendingWithdrawal {
 - Sets `vault.swig_address = args.swig_address`
 
 **Security checks:**
-- `vault.swig_address == Pubkey::default()` (one-shot bind — can never be changed)
+- `vault.swig_address == Pubkey::default()` (one-shot bind, can never be changed)
 - Passkey assertion verifies via `verify_passkey_signed` over op-msg `b"set_swig" || swig_address_bytes`
 
-**Threat: rebind to attacker's Swig.** Cannot happen — the bind is one-shot. Once `swig_address` is set, any subsequent `set_swig` call fails.
+**Threat: rebind to attacker's Swig.** Cannot happen, because the bind is one-shot. Once `swig_address` is set, any subsequent `set_swig` call fails.
 
-**Threat: bind to a Swig the user doesn't control.** The passkey signs over the Swig address, so the user must have intentionally signed. However, *intentionality* depends on the off-chain UI accurately showing the Swig address being bound. A malicious browser could substitute the Swig address before showing it to the user. This is a standard WebAuthn host-trust concern — relying-party origin pinning is the partial mitigation.
+**Threat: bind to a Swig the user doesn't control.** The passkey signs over the Swig address, so the user must have intentionally signed. However, *intentionality* depends on the off-chain UI accurately showing the Swig address being bound. A malicious browser could substitute the Swig address before showing it to the user. This is a standard WebAuthn host-trust concern; relying-party origin pinning is the partial mitigation.
 
-**UX consequence of one-shot bind:** if the user loses access to their Swig (e.g. all Swig authorities are compromised or lost), they cannot rebind a new Swig to the same vault. The vault is effectively orphaned — passkey-signed withdrawal requests will still work but no new spending is possible. This is by design (preventing a stolen-passkey attacker from rebinding), but it constrains recovery flows.
+**UX consequence of one-shot bind:** if the user loses access to their Swig (e.g. all Swig authorities are compromised or lost), they cannot rebind a new Swig to the same vault. The vault is effectively orphaned: passkey-signed withdrawal requests will still work but no new spending is possible. This is by design (preventing a stolen-passkey attacker from rebinding), but it constrains recovery flows.
 
 #### 3.2.3 `settle_voucher`
 
@@ -258,7 +258,7 @@ Neither instruction can be invoked by a third party, and neither moves funds.
 - Reject `request_withdrawal` if `signed_at <= vault.pending_withdrawal.requested_at`.
 - Or document that the threat is acceptable and proceed.
 
-**Threat: signed_at clock skew.** The 300-second window allows for legitimate clock drift between the browser and Solana. A malicious browser with an adjusted system clock could submit assertions up to 300s in the future or past, shifting the finalize-eligible time by at most 5 minutes. When a non-zero cooling-off is configured this is immaterial relative to the delay. With the default cooling-off of 0 (instant), a skew only advances finalize eligibility by up to 5 minutes — but it does **not** bypass the load-bearing protection: `finalize_withdrawal` independently requires `pending_voucher_count == 0`, so no clock manipulation releases funds while a tab is open. The skew affects only *when* an already-permitted withdrawal becomes eligible, not *whether* an impermissible one can occur.
+**Threat: signed_at clock skew.** The 300-second window allows for legitimate clock drift between the browser and Solana. A malicious browser with an adjusted system clock could submit assertions up to 300s in the future or past, shifting the finalize-eligible time by at most 5 minutes. When a non-zero cooling-off is configured this is immaterial relative to the delay. With the default cooling-off of 0 (instant), a skew only advances finalize eligibility by up to 5 minutes, but it does **not** bypass the load-bearing protection: `finalize_withdrawal` independently requires `pending_voucher_count == 0`, so no clock manipulation releases funds while a tab is open. The skew affects only *when* an already-permitted withdrawal becomes eligible, not *whether* an impermissible one can occur.
 
 #### 3.2.5 `finalize_withdrawal`
 
@@ -352,7 +352,7 @@ Total CU usage is well under any default instruction limit. Not a DoS vector.
 | Dexter operationally delays settlement (inflates/holds `pending_voucher_count`) | Trust assumption: Dexter is trusted to settle in good faith | Bounded by the `force_release` grace window: the buyer recovers their gate after it elapses regardless. Worst case is delay, never a permanent freeze or fund access. |
 | Compromised passkey | Standard WebAuthn assumption | Hardware-backed authenticator; biometric gating; `rotate_passkey` for migration off a key while the buyer still controls the current one |
 | Browser substitutes operation parameters | Standard WebAuthn host-trust concern | Origin pinning at RP ID level (Recommended additions in §4.2) |
-| Snooped `request_withdrawal` replay within 300s | Lack of nonce in op-msg | v1.1 to add nonce — issue #2 |
+| Snooped `request_withdrawal` replay within 300s | Lack of nonce in op-msg | v1.1 to add nonce, issue #2 |
 
 ### 5.3 Out-of-scope
 
@@ -369,8 +369,8 @@ Total CU usage is well under any default instruction limit. Not a DoS vector.
 |---|---|---|---|
 | [vault#1](https://github.com/Dexter-DAO/dexter-vault/issues/1) | WebAuthn verification audit-prep (origin pinning, UP/UV flags, JSON strictness) | High | Open, pre-audit |
 | [vault#2](https://github.com/Dexter-DAO/dexter-vault/issues/2) | Replay nonce + saturating math | Medium | Open, pre-audit |
-| [facilitator#45](https://github.com/Dexter-DAO/dexter-facilitator/issues/45) | Fire-and-forget vault increment race at session-open | High | **Closed**. Increment confirmed on-chain before session open (fail-closed) |
-| [facilitator#46](https://github.com/Dexter-DAO/dexter-facilitator/issues/46) | Crossmint vs vault path coexistence decision capture | Low (informational) | Open |
+
+Integration-layer requirements that a facilitator must satisfy (tab open confirmed before vouchers issue, reliable confirmed decrement) are specified in [`docs/OTS-STANDARDS-PROPOSAL.md`](./docs/OTS-STANDARDS-PROPOSAL.md) §5.3, not tracked here, since they live in the facilitator rather than the on-chain program.
 
 ---
 
@@ -381,9 +381,11 @@ Total CU usage is well under any default instruction limit. Not a DoS vector.
 | Test file | What it proves |
 |---|---|
 | `tests/drain-attempt.ts` | Buyer cannot finalize withdrawal while `pending_voucher_count > 0`. Verifies the load-bearing gate end-to-end. |
+| `tests/dexter-authority.ts` | Only the recorded `dexter_authority` can move the counter (any other signer rejected); `force_release` is rejected before its grace, with no stuck voucher, and for a foreign passkey. |
 | `tests/withdrawal-flow.ts` | Happy-path request-then-finalize works after cooling-off and zero tabs. |
 | `tests/settle-voucher.ts` | Increment and decrement work correctly; double-decrement from zero rejected. |
-| `tests/initialize-vault.ts` | Vault initialization correctness. |
+| `tests/rotation.ts` | Passkey and authority rotation each succeed for the current holder and reject a foreign signer. |
+| `tests/initialize-vault.ts` | Vault initialization correctness, including the recorded `dexter_authority`. |
 | `tests/set-swig.ts` | One-shot bind constraint. |
 
 ### 7.2 What is NOT covered by tests yet
@@ -401,7 +403,7 @@ To be added before audit kickoff.
 
 | Phase | Owner | Target |
 |---|---|---|
-| Pre-audit self-review | Dexter team | In progress — items in `vault#1`, `vault#2`, `facilitator#45` |
+| Pre-audit self-review | Dexter team | In progress, items in `vault#1`, `vault#2` |
 | Audit firm selection | Dexter team | Funded by seed round |
 | Audit kickoff | Audit firm | T+0 (post-funding) |
 | Audit completion | Audit firm | T+8 weeks (estimated) |

@@ -1,18 +1,18 @@
 ---
-title: "Tab — Technical Brief"
+title: "Tab: Technical Brief"
 subtitle: "On-chain non-custodial spending authorizations on Solana"
 date: 2026-05-28
 audience: Engineers, CTOs, technical reviewers
 status: Draft v1
 ---
 
-# Tab — Technical Brief
+# Tab: Technical Brief
 
-**Tab** is a reference implementation of the **Open Tabs Standard (OTS)** — an on-chain protocol for non-custodial, non-escrow spending authorizations on Solana. Funds never leave the buyer's wallet. Seller protection comes from an on-chain invariant that locks the buyer's withdrawal path while any authorization (a "tab") is outstanding.
+**Tab** is a reference implementation of the **Open Tabs Standard (OTS)**, an on-chain protocol for non-custodial, non-escrow spending authorizations on Solana. Funds never leave the buyer's wallet. Seller protection comes from an on-chain invariant that locks the buyer's withdrawal path while any authorization (a "tab") is outstanding.
 
 The reference implementation is live on Solana mainnet at program ID `Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc`.
 
-This document is for engineers and CTOs evaluating Tab as a payments primitive. It describes what it does, how it does it, what's verifiable today, and the two known caveats that affect production deployment.
+This document is for engineers and CTOs evaluating Tab as a payments primitive. It describes what it does, how it does it, what's verifiable today, and the known caveats that affect production deployment.
 
 ---
 
@@ -26,16 +26,17 @@ This inverts the standard escrow model. Instead of locking the *funds*, the prog
 
 ## State machine
 
-The vault program (`programs/dexter-vault/src/`) exposes five instructions. The Vault PDA holds three load-bearing state fields:
+The vault program (`programs/dexter-vault/src/`) exposes eight instructions over a single account type. The Vault PDA holds these state fields:
 
 ```rust
 pub struct Vault {
-    pub passkey_pubkey: [u8; 33],            // secp256r1 WebAuthn key
+    pub passkey_pubkey: [u8; 33],            // secp256r1 WebAuthn key (root authority)
     pub swig_address: Pubkey,                // bound Swig smart-wallet
     pub cooling_off_seconds: i64,            // optional delay before finalize (default 0 = instant)
-    pub pending_voucher_count: u32,          // outstanding tabs — the gate
+    pub pending_voucher_count: u32,          // outstanding tabs, the gate
     pub pending_withdrawal: Option<PendingWithdrawal>,
     pub supabase_user_id: [u8; 16],
+    pub dexter_authority: Pubkey,            // the only key permitted to move the counter
 }
 ```
 
@@ -43,11 +44,14 @@ pub struct Vault {
 
 | Instruction | Authority | Purpose |
 |---|---|---|
-| `initialize_vault` | Anyone (paid setup) | Create vault PDA, bind passkey pubkey, set cooling-off period |
-| `set_swig` | Passkey | Bind the Swig smart-wallet to this vault |
-| `settle_voucher` | Dexter session signer | Increment/decrement `pending_voucher_count` |
+| `initialize_vault` | Paid setup (records the counter authority) | Create vault PDA, bind passkey pubkey and counter authority, set cooling-off period |
+| `set_swig` | Passkey | Bind the Swig smart-wallet to this vault (one-shot) |
+| `settle_voucher` | Recorded counter authority (`has_one`) | Increment/decrement `pending_voucher_count` |
 | `request_withdrawal` | Passkey | Record intent to withdraw (no funds move) |
-| `finalize_withdrawal` | Passkey | Actually release funds — gated by counter and cooling-off |
+| `finalize_withdrawal` | Passkey | Release funds, gated by counter and cooling-off |
+| `force_release` | Passkey | Buyer recovery: clear a stuck tab after a 7-day grace (no funds move) |
+| `rotate_passkey` | Buyer's current passkey | Replace the root passkey |
+| `rotate_dexter_authority` | Current counter authority | Replace the counter authority |
 
 ### The gate
 
@@ -60,10 +64,10 @@ require!(vault.pending_voucher_count == 0, VaultError::PendingVouchersExist);
 ```
 
 Two preconditions to release funds, enforced independently:
-1. Cooling-off period has elapsed since `request_withdrawal` — configurable per vault, **defaults to 0 (instant)** in the reference implementation.
-2. `pending_voucher_count` is zero — no tabs outstanding.
+1. Cooling-off period has elapsed since `request_withdrawal`. This is configurable per vault and **defaults to 0 (instant)** in the reference implementation.
+2. `pending_voucher_count` is zero, meaning no tabs outstanding.
 
-The second check is the load-bearing one. The buyer's *own passkey signature* is rejected by their *own vault* if any tab is open — and that holds with cooling-off set to 0, which is why the default is instant. Cooling-off is available as an optional delay for deployments that want one (e.g. against a compromised passkey).
+The second check is the load-bearing one. The buyer's *own passkey signature* is rejected by their *own vault* if any tab is open, and that holds with cooling-off set to 0, which is why the default is instant. Cooling-off is available as an optional delay for deployments that want one (e.g. against a compromised passkey).
 
 ---
 
@@ -74,10 +78,12 @@ These claims are checkable from the public chain and the public source repo:
 | Claim | Evidence |
 |---|---|
 | Program is deployed on Solana mainnet | Program ID `Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc` |
-| Buyer cannot drain mid-tab | `tests/drain-attempt.ts` — explicit adversarial test, passes |
+| Buyer cannot drain mid-tab | `tests/drain-attempt.ts`, explicit adversarial test, passes |
 | Buyer's own passkey gets rejected | Same test, asserts `PendingVouchersExist` error |
-| Default cooling-off is 0 (instant) | `passkeyVault.ts` — `const DEFAULT_COOLING_OFF_SECONDS = 0n`; the voucher gate is the protection, not the delay |
-| Session role is bounded | `swigBundle.ts:158` — `Actions.set().tokenLimit(...).programAll()` |
+| Buyer cannot clear their own counter | `tests/dexter-authority.ts` asserts `settle_voucher` from any signer other than the recorded `dexter_authority` is rejected (`has_one`) |
+| Buyer can always recover an abandoned tab | `tests/dexter-authority.ts` asserts `force_release` is rejected before the 7-day grace and gated to the buyer's passkey |
+| Default cooling-off is 0 (instant) | `passkeyVault.ts`: `const DEFAULT_COOLING_OFF_SECONDS = 0n`; the voucher gate is the protection, not the delay |
+| Session role is bounded | `swigBundle.ts:215`: `Actions.set().tokenLimit(...).programAll()` |
 | WebAuthn signatures verified on-chain | `verify/webauthn.rs` via Solana's secp256r1 sysvar (`Secp256r1SigVerify1111111111111111111111111`) |
 
 ---
@@ -91,7 +97,7 @@ These claims are checkable from the public chain and the public source repo:
 | x402 batch-settle (#2051) | Locked via EIP-3009 / Permit2 deposit | No (funds escrowed) | Non-custodial |
 | Crossmint smart wallets | Crossmint custody | Depends on Crossmint policy | Custodial (MTL) |
 | Coinbase CDP smart wallets | Custodial or self-custody | No streaming primitive | Optional custody |
-| **Tab (OTS)** | **In buyer's own wallet** | **No — withdrawal path gated on-chain** | **Non-custodial, non-escrow** |
+| **Tab (OTS)** | **In buyer's own wallet** | **No, withdrawal path gated on-chain** | **Non-custodial, non-escrow** |
 
 Tab is the only known shipping protocol that achieves seller-protected streaming without either custody or escrow. Funds remain in the buyer's wallet at all times.
 
@@ -99,7 +105,7 @@ Tab is the only known shipping protocol that achieves seller-protected streaming
 
 ## What's required of the buyer's wallet
 
-The wallet must be a Swig smart-wallet whose root authority is bound to a Tab vault PDA. Existing Phantom/Backpack/Solflare wallets cannot retrofit Tab — the wallet shape is part of the standard. A user with an existing wallet creates a new Tab-shaped wallet, funds it (typically via on-ramp or transfer), and uses *that* for streaming/agentic spending.
+The wallet must be a Swig smart-wallet whose root authority is bound to a Tab vault PDA. Existing Phantom/Backpack/Solflare wallets cannot retrofit Tab, because the wallet shape is part of the standard. A user with an existing wallet creates a new Tab-shaped wallet, funds it (typically via on-ramp or transfer), and uses *that* for streaming/agentic spending.
 
 This is intentional. The on-chain enforcement only works because the program owns the relationship between the passkey, the Swig, and the withdrawal gate. A user with an arbitrary external wallet cannot opt in to OTS protections without re-creating their wallet inside the standard.
 
@@ -117,17 +123,13 @@ A complete agentic-payments security model on Solana uses both: keys live in OWS
 
 ## Known caveats
 
-### 1. Fire-and-forget increment race
+### 1. Replay window on `request_withdrawal`
 
-The current facilitator implementation issues the `increment` instruction fire-and-forget at session-open time (`mppSession.ts:182`). If the increment tx fails (RPC unavailable, fee-payer drained, blockhash expiry), the session opens anyway and the on-chain gate is silently off for that session.
-
-Mitigations under design: block session-open on increment confirmation, or gate voucher issuance on the on-chain count being >0. Tracked in `Dexter-DAO/dexter-facilitator#45`.
-
-This affects the integration layer, not the on-chain program. The on-chain enforcement is correct; what's at risk is whether the increment lands in the first place. The drain-attempt test explicitly demonstrates the on-chain gate works when the count is correctly maintained.
+The vault accepts a passkey assertion within a 300-second clock drift and carries no per-operation nonce, so a snooped `request_withdrawal` assertion could in principle be replayed within that window. The recommended fix, slated for v1.1, is a monotonic operation nonce bound into the signed message. This is a pre-audit finding in the reference implementation, tracked in `Dexter-DAO/dexter-vault#2`. It does not affect the core withdrawal gate: replaying the request still cannot finalize a withdrawal while a tab is open, and finalize requires its own fresh passkey signature.
 
 ### 2. Wallet-creation requirement
 
-As noted above, OTS requires a Tab-shaped wallet. Users with existing external wallets must create a new Tab-shaped wallet. This is a UX hurdle, not a security issue — but it's worth being explicit about it in product narratives.
+As noted above, OTS requires a Tab-shaped wallet. Users with existing external wallets must create a new Tab-shaped wallet. This is a UX hurdle, not a security issue, but it's worth being explicit about it in product narratives.
 
 ---
 
@@ -135,7 +137,7 @@ As noted above, OTS requires a Tab-shaped wallet. Users with existing external w
 
 The vault program has not been externally audited. Funding to commission an audit is in flight as of this writing.
 
-Self-review checklist in `Dexter-DAO/dexter-vault#1` (WebAuthn verification) and `Dexter-DAO/dexter-vault#2` (replay/nonce, saturating math) tracks pre-audit work. Code is reviewable today; the program is small (~250 lines across five instructions plus WebAuthn verification helpers).
+Self-review checklist in `Dexter-DAO/dexter-vault#1` (WebAuthn verification) and `Dexter-DAO/dexter-vault#2` (replay/nonce, saturating math) tracks pre-audit work. Code is reviewable today; the program is small (~550 lines across eight instructions plus WebAuthn verification helpers).
 
 ---
 
@@ -144,9 +146,10 @@ Self-review checklist in `Dexter-DAO/dexter-vault#1` (WebAuthn verification) and
 If you're a CTO at a potential partner or a serious technical reviewer, the questions worth asking are:
 
 1. Does the `pending_voucher_count` invariant actually enforce what the spec claims it enforces? (Read `finalize_withdrawal.rs` + `tests/drain-attempt.ts`.)
-2. Is the WebAuthn verification correct? (Read `verify/webauthn.rs` — pending external audit.)
-3. Is the fire-and-forget increment race acceptable for your use case, or do you need the integration layer hardened first?
-4. Is the wallet-creation requirement compatible with your user flow?
+2. Is the counter authority correctly bound, so only the recorded `dexter_authority` can move the gate? (Read `settle_voucher.rs` + `tests/dexter-authority.ts`.)
+3. Is the WebAuthn verification correct? (Read `verify/webauthn.rs`, pending external audit.)
+4. Is the replay window on `request_withdrawal` acceptable for your use case, or do you need the nonce fix landed first?
+5. Is the wallet-creation requirement compatible with your user flow?
 
 These are the right questions and we don't have anything to hide on any of them.
 
@@ -156,6 +159,6 @@ These are the right questions and we don't have anything to hide on any of them.
 
 - Program: `Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc` on Solana mainnet
 - Source: [`Dexter-DAO/dexter-vault`](https://github.com/Dexter-DAO/dexter-vault) (public, MIT)
-- Tracking issues: `Dexter-DAO/dexter-facilitator#45`, `#46`; `Dexter-DAO/dexter-vault#1`, `#2`
+- Pre-audit tracking issues: `Dexter-DAO/dexter-vault#1` (WebAuthn verification), `#2` (replay/nonce, saturating math)
 - Open Wallet Standard: <https://openwallet.sh>
 - x402 batch-settlement (for comparison): `x402-foundation/x402#2051`

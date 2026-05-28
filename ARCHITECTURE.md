@@ -1,7 +1,7 @@
-# Architecture — dexter-vault
+# Architecture: dexter-vault
 
 **Program:** `Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc` (Solana mainnet)
-**Document status:** v1, 2026-05-10
+**Document status:** v1.1, 2026-05-28
 
 This document is the end-to-end architecture reference for the dexter-vault Anchor program. It is intended for engineers integrating with the program, second/third implementers of the Open Tabs Standard (OTS), and reviewers building a mental model of the system.
 
@@ -11,7 +11,7 @@ For security properties and threat model, see [`SECURITY.md`](./SECURITY.md). Fo
 
 ## 1. What dexter-vault is
 
-dexter-vault is one Anchor program that defines a single account type (`Vault`) and five instructions. Its job is to gate withdrawal from a buyer's Swig smart-wallet such that the buyer cannot drain the wallet while spending authorizations ("tabs") are outstanding.
+dexter-vault is one Anchor program that defines a single account type (`Vault`) and eight instructions. Its job is to gate withdrawal from a buyer's Swig smart-wallet such that the buyer cannot drain the wallet while spending authorizations ("tabs") are outstanding.
 
 The program does **not** move funds. The actual movement of USDC from the buyer's Swig wallet happens via the Swig program, signed by a session role that Dexter operates. dexter-vault's job is bookkeeping and gating:
 
@@ -19,7 +19,7 @@ The program does **not** move funds. The actual movement of USDC from the buyer'
 - Track a pending withdrawal intent (`pending_withdrawal`).
 - Enforce that withdrawals only finalize when (count == 0) AND (cooling-off elapsed).
 
-That's it. The program is small, deliberately. It is ~250 lines of Rust across five instructions plus a WebAuthn verification module.
+That's it. The program is small, deliberately. It is roughly 550 lines of Rust across eight instructions plus a WebAuthn verification module.
 
 ---
 
@@ -88,6 +88,7 @@ pub struct Vault {
     pub pending_voucher_count: u32,          // outstanding tabs counter
     pub pending_withdrawal: Option<PendingWithdrawal>,
     pub supabase_user_id: [u8; 16],          // off-chain user identifier
+    pub dexter_authority: Pubkey,            // the key permitted to move the counter
 }
 
 pub struct PendingWithdrawal {
@@ -104,7 +105,7 @@ seeds = [b"vault", supabase_user_id]
 program_id = Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc
 ```
 
-One vault per Supabase user ID. The Supabase user ID is a 16-byte UUID identifying the user in Dexter's off-chain user-account system. Different products on top of dexter-vault could use different ID schemes — the PDA construction does not constrain the meaning of the 16 bytes, only that they uniquely identify a "vault owner."
+One vault per Supabase user ID. The Supabase user ID is a 16-byte UUID identifying the user in Dexter's off-chain user-account system. Different products on top of dexter-vault could use different ID schemes; the PDA construction does not constrain the meaning of the 16 bytes, only that they uniquely identify a "vault owner."
 
 ### 3.3 Rent / size
 
@@ -117,10 +118,11 @@ One vault per Supabase user ID. The Supabase user ID is a 16-byte UUID identifyi
 + 4 (pending_voucher_count)
 + (1 + 48) (pending_withdrawal Option + PendingWithdrawal)
 + 16 (supabase_user_id)
-= 151 bytes total
++ 32 (dexter_authority)
+= 183 bytes total
 ```
 
-Rent-exempt deposit at current Solana rates: ~0.00154 SOL (~$0.30 at $200/SOL).
+Rent-exempt deposit at current Solana rates: ~0.00177 SOL (~$0.35 at $200/SOL).
 
 ---
 
@@ -146,18 +148,20 @@ pub struct InitializeVaultArgs {
 
 **Accounts:**
 - `vault` (init, PDA `seeds=[b"vault", supabase_user_id]`)
-- `payer` (signer, mut — pays rent)
+- `payer` (signer, mut, pays rent)
+- `dexter_authority` (signer, recorded as the vault's counter authority)
 - `system_program`
 
 **Effects:**
 - Allocates and initializes the Vault account.
-- `swig_address` starts as `Pubkey::default()` — vault is "initialized but unbound."
+- `swig_address` starts as `Pubkey::default()`: vault is "initialized but unbound."
+- `dexter_authority` is recorded from the signing account and is the only key that may later move `pending_voucher_count`.
 
 **Who calls this:** Currently called by Dexter's API server (`dexter-api/src/routes/passkeyVault.ts`) on behalf of a user who just completed passkey enrollment. The payer is a fee-payer wallet operated by Dexter. The user is not required to hold SOL.
 
 ### 4.2 `set_swig`
 
-**Purpose:** Bind a Swig smart-wallet to a vault. **One-shot — can only be called once per vault.**
+**Purpose:** Bind a Swig smart-wallet to a vault. **One-shot: can only be called once per vault.**
 
 **Signature:**
 ```rust
@@ -189,8 +193,8 @@ pub struct SetSwigArgs {
 
 **Transaction structure (typical):**
 ```
-[0] SIMD-0075 sigverify (secp256r1) — verifies passkey signature
-[1] dexter-vault::set_swig — checks the sigverify output, sets state
+[0] SIMD-0075 sigverify (secp256r1): verifies passkey signature
+[1] dexter-vault::set_swig: checks the sigverify output, sets state
 ```
 
 ### 4.3 `settle_voucher`
@@ -205,18 +209,20 @@ pub fn settle_voucher(
 ) -> Result<()>
 
 pub struct SettleVoucherArgs {
-    pub amount: u64,        // currently advisory — not stored
+    pub amount: u64,        // currently advisory, not stored
     pub increment: bool,
 }
 ```
 
 **Accounts:**
-- `vault` (mut)
-- `dexter_session_signer` (signer — must match Dexter's session master key)
+- `vault` (mut, `has_one = dexter_authority`)
+- `dexter_authority` (signer, must equal the `dexter_authority` recorded on the vault at init)
 
 **Effects:**
 - `increment=true` → `pending_voucher_count = pending_voucher_count.saturating_add(1)`
 - `increment=false` → `pending_voucher_count -= 1` (requires `> 0`)
+
+The counter is the buyer's withdrawal gate, so the authority that moves it is bound to the vault at init and checked on every call via Anchor's `has_one`. A signer other than the recorded `dexter_authority` is rejected; the buyer's passkey does not authorize this instruction. This binding is what makes the gate load-bearing: without it, a buyer could call `settle_voucher` to zero their own counter and withdraw mid-tab.
 
 **The `amount` argument is currently advisory.** It is captured for future use (e.g. on-chain ledger of cumulative authorized amount, useful for audit trails) but is not stored in the vault account today. Implementers should expect this field to become load-bearing in v1.1.
 
@@ -255,7 +261,7 @@ pub struct RequestWithdrawalArgs {
 
 ### 4.5 `finalize_withdrawal`
 
-**Purpose:** Authorize the pending withdrawal — the load-bearing gate.
+**Purpose:** Authorize the pending withdrawal. This is the load-bearing gate.
 
 **Signature:**
 ```rust
@@ -275,18 +281,105 @@ pub struct FinalizeWithdrawalArgs {
 - `swig` (must match `vault.swig_address`)
 - `instructions_sysvar`
 
-**Pre-conditions (in order):**
-1. `vault.pending_withdrawal` is Some
-2. `vault.swig_address != Pubkey::default()`
-3. `swig.key() == vault.swig_address`
-4. `now - pending.requested_at >= vault.cooling_off_seconds`
-5. **`vault.pending_voucher_count == 0`**
-6. Passkey assertion verifies over `b"finalize_withdrawal" || pending.amount_le || pending.destination_bytes`
+**Pre-conditions** (checked in this order):
+- `vault.pending_withdrawal` is Some
+- `vault.swig_address != Pubkey::default()`
+- `swig.key() == vault.swig_address`
+- `now - pending.requested_at >= vault.cooling_off_seconds`
+- **`vault.pending_voucher_count == 0`** (the load-bearing gate)
+- Passkey assertion verifies over `b"finalize_withdrawal" || pending.amount_le || pending.destination_bytes`
 
 **Effects:**
 - Sets `vault.pending_withdrawal = None`.
 
 **Important:** This instruction does **not** move funds either. It clears the pending-withdrawal record after verifying eligibility. The actual transfer must happen in a separate transaction signed by the Swig's root authority (which the buyer's passkey can authorize via the Swig program). The current production flow performs `finalize_withdrawal` and then constructs a Swig sign-and-transfer transaction separately.
+
+### 4.6 `force_release`
+
+**Purpose:** The buyer's recovery valve. Clears a stuck tab the facilitator never settled, so an abandoned tab can never permanently freeze the buyer's funds.
+
+**Signature:**
+```rust
+pub fn force_release(
+    ctx: Context<ForceRelease>,
+    args: ForceReleaseArgs,
+) -> Result<()>
+
+pub struct ForceReleaseArgs {
+    pub client_data_json: Vec<u8>,
+    pub authenticator_data: Vec<u8>,
+}
+```
+
+**Accounts:**
+- `vault` (mut)
+- `instructions_sysvar`
+
+**Pre-conditions** (checked in this order):
+- `vault.pending_voucher_count > 0` (else `NothingToRelease`)
+- `vault.pending_withdrawal` is Some (else `NothingToRelease`)
+- `now - pending.requested_at >= FORCE_RELEASE_GRACE_SECONDS` (7 days; else `ForceReleaseTooEarly`)
+- Passkey assertion verifies over `b"force_release" || swig_address[32]`
+
+**Effects:**
+- Decrements `pending_voucher_count` by one. Repeated calls (each re-gated by the grace condition and a fresh passkey signature) clear more.
+
+**Important:** This moves no funds. It only decrements the counter; the buyer still finalizes withdrawal with a separate passkey signature under the normal §4.5 gate. The 7-day grace, measured from `request_withdrawal`, is the seller's guaranteed settlement window: an honest seller always settles within it, so this path only fires on genuine abandonment and cannot be used to escape a live tab.
+
+### 4.7 `rotate_passkey`
+
+**Purpose:** Rotate the buyer's root passkey, so a vault is never permanently bound to a lost or compromised key.
+
+**Signature:**
+```rust
+pub fn rotate_passkey(
+    ctx: Context<RotatePasskey>,
+    args: RotatePasskeyArgs,
+) -> Result<()>
+
+pub struct RotatePasskeyArgs {
+    pub new_passkey_pubkey: [u8; 33],
+    pub client_data_json: Vec<u8>,
+    pub authenticator_data: Vec<u8>,
+}
+```
+
+**Accounts:**
+- `vault` (mut)
+- `instructions_sysvar`
+
+**Pre-conditions:**
+- The **current** passkey signs: assertion verifies over `b"rotate_passkey" || new_passkey_pubkey[33]`
+
+**Effects:**
+- Sets `vault.passkey_pubkey = args.new_passkey_pubkey`. No funds move; the counter is untouched.
+
+### 4.8 `rotate_dexter_authority`
+
+**Purpose:** Rotate the counter authority, so the facilitator's session key can be replaced without bricking existing vaults.
+
+**Signature:**
+```rust
+pub fn rotate_dexter_authority(
+    ctx: Context<RotateDexterAuthority>,
+    args: RotateDexterAuthorityArgs,
+) -> Result<()>
+
+pub struct RotateDexterAuthorityArgs {
+    pub new_dexter_authority: Pubkey,
+}
+```
+
+**Accounts:**
+- `vault` (mut, `has_one = dexter_authority`)
+- `dexter_authority` (signer, the **current** authority)
+
+**Pre-conditions:**
+- Signed by the vault's current `dexter_authority` (`has_one`)
+- `new_dexter_authority != Pubkey::default()`
+
+**Effects:**
+- Sets `vault.dexter_authority = args.new_dexter_authority`. Touches only the authority field; never the passkey, the swig, or the counter, and never moves funds.
 
 ---
 
@@ -296,11 +389,11 @@ pub struct FinalizeWithdrawalArgs {
 
 The Dexter facilitator (Node.js, `dexter-facilitator/src/`) is the primary off-chain consumer of dexter-vault. It:
 
-1. **Operates the session master key.** The facilitator holds a Keypair whose pubkey matches the `dexter_session_signer` expected by `settle_voucher`. This is the key Dexter uses to call `settle_voucher` on behalf of every Tab user.
+1. **Operates the counter authority.** The facilitator holds a Keypair whose pubkey matches the `dexter_authority` recorded on each vault, the key `settle_voucher` requires via `has_one`. This is the key Dexter uses to call `settle_voucher` on behalf of every Tab user.
 
 2. **Looks up vaults by Swig address.** When a session opens, the facilitator queries `dexter-api` for the vault PDA bound to the buyer's Swig (`dexter-facilitator/src/vaultPendingVoucher.ts:84`).
 
-3. **Increments on session-open.** When `/mpp/session/open` is called and the buyer's Swig has a bound vault, the facilitator broadcasts a `settle_voucher(increment=true)` transaction (`mppSession.ts:182`). **Currently fire-and-forget; see issue #45.**
+3. **Increments on session-open, confirmed before the tab opens.** When `/mpp/session/open` is called and the buyer's Swig has a bound vault, the facilitator broadcasts `settle_voucher(increment=true)` and waits for on-chain confirmation before the session opens and any voucher is issued (`mppSession.ts:182`). Opening fail-closed this way removes the window in which a tab could be charged while its increment was still in flight.
 
 4. **Decrements on session-settle.** When a session closes and settlement broadcasts on-chain, the facilitator appends a `settle_voucher(increment=false)` instruction to the settlement transaction (`mppSession.ts:431`). This atomically pairs the seller-payment with the counter decrement.
 
@@ -347,7 +440,7 @@ While vault open/close happen on-chain via `settle_voucher`, the actual per-requ
 
 Sellers verify vouchers locally (no chain call). At tab close, the cumulative amount is settled in a single on-chain transaction.
 
-The voucher format is **not normatively part of OTS v1.0** — facilitators and clients may negotiate their own format. v1.1 may standardize this.
+The voucher format is **not normatively part of OTS v1.0**; facilitators and clients may negotiate their own format. v1.1 may standardize this.
 
 ---
 
@@ -384,10 +477,10 @@ Transaction:
 ```
 Transaction:
   [0] dexter-vault::settle_voucher
-        - vault (mut)
-        - dexter_session_signer
+        - vault (mut, has_one = dexter_authority)
+        - dexter_authority
         - args: { amount, increment: true }
-  Signers: [Dexter fee payer, Dexter session master keypair]
+  Signers: [Dexter fee payer, Dexter counter-authority keypair]
 ```
 
 ### 6.4 Session settlement (with embedded decrement)
@@ -398,15 +491,17 @@ Transaction:
   [1] compute-budget::set_unit_price (adaptive priority fee)
   [2..N] Swig::sign instructions (move USDC from buyer to seller)
   [N+1] dexter-vault::settle_voucher
+        - vault (mut, has_one = dexter_authority)
+        - dexter_authority
         - args: { amount: cumulative, increment: false }
-  Signers: [Dexter fee payer, Dexter session master keypair]
+  Signers: [Dexter fee payer, Dexter counter-authority keypair]
 ```
 
 The decrement is **embedded** in the settlement transaction so that the counter drops to zero atomically with the seller being paid. If settlement fails, the counter stays at its previous value and the tab remains "open" from the vault's perspective.
 
 ### 6.5 Withdrawal (full flow)
 
-Step 1 — request:
+Step 1: request:
 ```
 Transaction A:
   [0] secp256r1::sigverify
@@ -414,14 +509,14 @@ Transaction A:
   Signers: [Dexter fee payer]
 ```
 
-Step 2 — wait `cooling_off_seconds` (default 0 = instant; configurable per vault for an optional delay)
+Step 2: wait `cooling_off_seconds` (default 0 = instant; configurable per vault for an optional delay)
 
-Step 3 — finalize + transfer:
+Step 3: finalize + transfer:
 ```
 Transaction B:
   [0] secp256r1::sigverify (passkey assertion for finalize_withdrawal)
   [1] dexter-vault::finalize_withdrawal
-        (clears pending_withdrawal — no funds move)
+        (clears pending_withdrawal, no funds move)
   [2..N] Swig::sign instructions (actual USDC transfer)
   Signers: [Dexter fee payer, plus whatever Swig requires for root authority]
 ```
@@ -475,8 +570,10 @@ Each gated instruction has a distinct operation-message prefix:
 | `set_swig` | `b"set_swig" \|\| swig_address[32]` |
 | `request_withdrawal` | `b"request_withdrawal" \|\| amount[8 LE] \|\| destination[32] \|\| signed_at[8 LE]` |
 | `finalize_withdrawal` | `b"finalize_withdrawal" \|\| amount[8 LE] \|\| destination[32]` |
+| `force_release` | `b"force_release" \|\| swig_address[32]` |
+| `rotate_passkey` | `b"rotate_passkey" \|\| new_passkey_pubkey[33]` |
 
-The challenge in the WebAuthn assertion is `sha256(operation_message)`. The prefix prevents an assertion for one operation from being reused for another.
+The challenge in the WebAuthn assertion is `sha256(operation_message)`. The prefix prevents an assertion for one operation from being reused for another. (`rotate_dexter_authority` is gated by the current authority's signature via `has_one`, not a passkey assertion, so it carries no operation message.)
 
 ---
 
@@ -490,9 +587,9 @@ anchor build
 ```
 
 Outputs:
-- `target/deploy/dexter_vault.so` — compiled program
-- `target/idl/dexter_vault.json` — IDL
-- `target/types/dexter_vault.ts` — TypeScript types
+- `target/deploy/dexter_vault.so`: compiled program
+- `target/idl/dexter_vault.json`: IDL
+- `target/types/dexter_vault.ts`: TypeScript types
 
 ### 8.2 Test
 
@@ -505,7 +602,9 @@ Runs:
 - `tests/set-swig.ts`
 - `tests/settle-voucher.ts`
 - `tests/withdrawal-flow.ts`
-- `tests/drain-attempt.ts` — **the adversarial test**
+- `tests/dexter-authority.ts`: **counter-authority binding + buyer recovery gating**
+- `tests/rotation.ts`: passkey and authority rotation
+- `tests/drain-attempt.ts`: **the mid-tab drain adversarial test**
 
 ### 8.3 Deploy
 
@@ -518,7 +617,7 @@ For audit-grade redeployment:
 
 ---
 
-## 9. Implementing OTS — for second/third implementers
+## 9. Implementing OTS: for second/third implementers
 
 If you are implementing OTS in a different repo (e.g. an EVM mirror, an alternative Solana implementation, a different smart-wallet primitive), the required properties are:
 
@@ -536,34 +635,41 @@ Your vault account MUST contain at minimum:
 
 Your program MUST expose, at minimum:
 
-- An initialization instruction
+- An initialization instruction (records the counter authority)
 - A bind-wallet instruction (passkey-gated, one-shot)
-- An increment/decrement instruction for outstanding-tabs (facilitator-gated)
+- An increment/decrement instruction for outstanding-tabs, gated by a counter authority **bound to the vault at init**, not any arbitrary signer
 - A request-withdrawal instruction (passkey-gated)
 - A finalize-withdrawal instruction (passkey-gated, requires `count == 0 AND cooling-off elapsed`)
+- A buyer-controlled recovery instruction (passkey-gated, grace-windowed) so an abandoned tab cannot permanently freeze the buyer's funds
+
+It SHOULD also expose rotation for both the passkey and the counter authority, each signed by its current holder, so a vault is never permanently bound to a stale or compromised key.
 
 ### 9.3 Required security properties
 
 The implementation MUST enforce:
 
-1. The withdrawal gate (load-bearing).
-2. One-shot wallet bind.
-3. Passkey signature verification on all passkey-gated instructions.
-4. Operation-message uniqueness across instructions (distinct prefixes).
-5. Bounded session-role authority on the bound smart-wallet (delegated to the facilitator's spending side).
+- The withdrawal gate (load-bearing).
+- The counter authority bound at init: only that key moves the tab counter, never the buyer's passkey and never an arbitrary signer. Without this the withdrawal gate is cosmetic.
+- One-shot wallet bind.
+- Passkey signature verification on all passkey-gated instructions.
+- Operation-message uniqueness across instructions (distinct prefixes).
+- Bounded session-role authority on the bound smart-wallet (delegated to the facilitator's spending side).
+- A buyer-controlled, grace-windowed recovery path that decrements a stuck counter without moving funds.
 
 ### 9.4 Recommended but not required
 
 - Adaptive priority fee on settlement transactions
 - Atomic decrement-with-settlement (to ensure counter integrity even on partial failures)
 - Drift check on signed timestamps
-- Replay protection beyond drift (nonces — recommended for v1.1)
+- Replay protection beyond drift (nonces, recommended for v1.1)
 
 ### 9.5 Pre-audit checklist
 
 Before going to mainnet:
 
 - [ ] Adversarial test: prove `count > 0` blocks withdrawal
+- [ ] Adversarial test: prove a signer other than the recorded counter authority cannot move the counter
+- [ ] Adversarial test: prove the buyer recovery path is rejected before its grace window
 - [ ] Adversarial test: prove one-shot bind cannot be bypassed
 - [ ] Adversarial test: prove cross-instruction signature reuse is rejected
 - [ ] Document threat model (cf. `SECURITY.md`)
@@ -577,16 +683,16 @@ Before going to mainnet:
 |---|---|
 | **Vault** | The dexter-vault account that owns a user's withdrawal-gating state |
 | **Swig** | A bounded-authority smart-wallet primitive on Solana (Anagram) |
-| **Session role** | A delegated authority on a Swig with `tokenLimit` + TTL — Dexter's spending side |
-| **Master key / session master keypair** | The Keypair Dexter operates as `dexter_session_signer` for `settle_voucher` |
+| **Session role** | A delegated authority on a Swig with `tokenLimit` + TTL, Dexter's spending side |
+| **Counter authority / session master keypair** | The Keypair Dexter operates as the vault's `dexter_authority`; required by `settle_voucher` via `has_one` |
 | **Passkey** | A secp256r1 / P-256 keypair held in the user's WebAuthn authenticator |
 | **WebAuthn / FIDO2** | The browser standard for hardware-backed authentication |
 | **secp256r1 sysvar / SIMD-0075** | Solana's on-chain P-256 signature verification precompile |
-| **Tab** | An open spending authorization — represented on-chain by `pending_voucher_count > 0` |
+| **Tab** | An open spending authorization, represented on-chain by `pending_voucher_count > 0` |
 | **Voucher** | An off-chain signed receipt for a single charge against an open tab |
 | **Cooling-off** | The delay between `request_withdrawal` and the earliest valid `finalize_withdrawal` |
 | **Facilitator** | The off-chain service that operates the session-side of the protocol (Dexter or others) |
-| **OTS** | Open Tabs Standard — the protocol this program implements |
+| **OTS** | Open Tabs Standard, the protocol this program implements |
 
 ---
 
