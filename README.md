@@ -28,7 +28,7 @@ The program **does not move funds.** USDC moves out of the buyer's Swig wallet v
 - Track a pending withdrawal intent (`pending_withdrawal`).
 - Allow a withdrawal to finalize **only** when the buyer's passkey has signed it, a cooling-off window has elapsed, **and** zero tabs are outstanding.
 
-It is ~250 lines of Rust across five instructions plus a WebAuthn verification module. Small on purpose: a withdrawal gate is only as trustworthy as it is reviewable, so the program keeps its surface area minimal and its invariants few.
+It is ~560 lines of Rust — five instructions plus a WebAuthn verification module. Small on purpose: a withdrawal gate is only as trustworthy as it is reviewable, so the program keeps its surface area minimal and its invariants few.
 
 Program: **`Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc`** (Solana mainnet)
 
@@ -38,7 +38,7 @@ Streaming agent payments have a hard problem: the agent needs standing authoriza
 
 - **Your passkey is the root authority.** Only a WebAuthn assertion from your device can initiate a withdrawal. Dexter never holds a key that can move your funds out of the wallet.
 - **Dexter's session role is bounded.** Granted at onboarding with a `tokenLimit`, `programAll` scope, and a TTL — enforced by the Swig program, not by trust.
-- **Open tabs veto withdrawals.** `pending_voucher_count` is the load-bearing gate. While it is non-zero, a withdrawal cannot finalize — this is what protects against the rogue-buyer drain, and it is proven by [`tests/drain-attempt.ts`](./tests/) (which sets cooling-off to 0 and is still blocked).
+- **Open tabs veto withdrawals.** `pending_voucher_count` is the load-bearing gate. While it is non-zero, a withdrawal cannot finalize — this is what blocks the rogue-buyer drain (spend on a tab, then withdraw before settlement), exercised by [`tests/drain-attempt.ts`](./tests/drain-attempt.ts), which sets cooling-off to 0 and confirms the mid-session drain is still rejected.
 
 This is the on-chain enforcement behind Dexter's non-custodial wallet — see [`SECURITY.md`](./SECURITY.md) for the full threat model and [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the end-to-end flow.
 
@@ -72,6 +72,8 @@ The trust boundary is deliberately narrow. **The on-chain program is authoritati
 - **Bound-once Swig:** `swig_address` is set exactly once and can never be rebound.
 - **Bounded session role:** Dexter's spend authority is capped and TTL'd by the Swig program.
 - **No fund custody:** dexter-vault never moves money. It gates; Swig moves.
+
+This protects the **buyer**. It does not claim to protect the buyer from Dexter in every dimension — e.g. a malicious facilitator could inflate `pending_voucher_count` to lock a vault (a griefing vector, not a theft vector). Such known issues, with their reasoning and remediation status, are tracked honestly in [`SECURITY.md`](./SECURITY.md).
 
 Audit status: **not yet externally audited** (funding in flight). Full threat model, trust assumptions, and known-issue registry in [`SECURITY.md`](./SECURITY.md). Responsible disclosure: open an issue or email branch@dexter.cash.
 
