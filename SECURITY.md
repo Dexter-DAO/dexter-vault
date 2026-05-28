@@ -2,7 +2,7 @@
 
 **Program:** `Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc` (Solana mainnet)
 **Audit status:** Not yet externally audited. Funding in flight.
-**Document status:** Pre-audit self-review (v1, 2026-05-10)
+**Document status:** Pre-audit self-review (v1.1, 2026-05-28)
 
 This document is the authoritative description of the security properties enforced by the dexter-vault program. It is intended for external auditors, technical reviewers, and second/third implementers of the Open Tabs Standard (OTS). It is also the registry of known issues with their reasoning and remediation status.
 
@@ -17,7 +17,8 @@ dexter-vault is an Anchor program that gates withdrawal from a buyer's bound Swi
 1. **Withdrawal gate.** The buyer's funds can only leave their bound Swig wallet after (a) the buyer's passkey signs a `request_withdrawal`, (b) a cooling-off period elapses, and (c) zero tabs are outstanding.
 2. **Bound-once Swig.** A vault's `swig_address` can be set exactly once via `set_swig`. It cannot be rebound.
 3. **Bounded session role.** Dexter's session role on the bound Swig is granted at onboarding with `tokenLimit`, `programAll`, and a TTL — these limits are enforced by the Swig program, not by dexter-vault.
-4. **Counter-based tab tracking.** `pending_voucher_count` is a monotonic counter incremented by Dexter's session signer on tab open and decremented on settle. The counter is the load-bearing gate behind property (1).
+4. **Counter-based tab tracking.** `pending_voucher_count` is a counter incremented on tab open and decremented on settle. Mutation is bound to the vault's recorded `dexter_authority` via `has_one`; no other signer can move it. The counter is the load-bearing gate behind property (1).
+5. **Authority-gated counter, buyer-owned recovery.** Only the `dexter_authority` recorded at `initialize_vault` can change `pending_voucher_count` (`settle_voucher`). If that authority abandons a tab and leaves the counter stuck, the buyer's own passkey can clear it via `force_release` after a grace period. The gate can never permanently trap a buyer's funds, and the authority never gains the ability to move funds.
 
 This document is concerned only with what dexter-vault itself enforces. Related security properties enforced by the Swig program are noted but not the primary subject here.
 
@@ -89,7 +90,8 @@ The vault has the following state fields (`programs/dexter-vault/src/state.rs`):
 ```rust
 pub struct Vault {
     pub bump: u8,
-    pub passkey_pubkey: [u8; 33],            // secp256r1 compressed pubkey
+    pub passkey_pubkey: [u8; 33],            // secp256r1 compressed pubkey (root withdrawal authority)
+    pub dexter_authority: Pubkey,            // the only key permitted to move pending_voucher_count
     pub swig_address: Pubkey,                // bound Swig (Pubkey::default() if unbound)
     pub cooling_off_seconds: i64,            // withdrawal delay
     pub pending_voucher_count: u32,          // outstanding tabs
@@ -183,32 +185,55 @@ pub struct PendingWithdrawal {
 
 #### 3.2.3 `settle_voucher`
 
-**Authority required:** Dexter session signer (currently a Keypair held by the facilitator).
+**Authority required:** the vault's recorded `dexter_authority`.
 
 **State changes:**
 - If `args.increment == true`: `pending_voucher_count = pending_voucher_count.saturating_add(1)`
 - If `args.increment == false`: `pending_voucher_count -= 1` (requires `> 0`)
 
 **Security checks:**
-- `dexter_session_signer: Signer<'info>` — must be a transaction signer.
-- On decrement: `require!(pending_voucher_count > 0, VaultError::NoPendingWithdrawal)` — note the error code is misleading; tracked in issue #2.
+- `#[account(mut, has_one = dexter_authority)]`: the signer must equal the `dexter_authority` pubkey recorded on the vault at `initialize_vault`. A transaction signed by any other key fails the constraint before any state change.
+- `dexter_authority: Signer<'info>`: must sign the transaction.
+- On decrement: `require!(pending_voucher_count > 0, VaultError::NoPendingWithdrawal)`. Note the error code is misleading; tracked in issue #2.
 
-**Threat: Dexter inflates `pending_voucher_count` to permanently lock the vault.** Possible. Dexter could call `settle_voucher(increment=true)` repeatedly without ever decrementing, eventually saturating at `u32::MAX`. The vault becomes permanently un-withdrawable.
+**Threat: an unrelated key mutates the counter.** Not possible. `has_one = dexter_authority` binds counter mutation to the single pubkey recorded at vault creation. This is the load-bearing protection for property (1): because the counter is the withdrawal gate, an unconstrained signer could let a buyer clear their own gate and exit a tab before the seller settled. The binding closes that, so only the recorded authority can open or settle a tab.
 
-**Mitigation:** Off-chain operational controls (the facilitator should only call `settle_voucher` in response to a real session). On-chain, this is currently unmitigated. Possible v1.1 improvements:
-- A per-session-key rate limit (e.g. max N increments per N seconds)
-- A user-callable "panic decrement" gated on no recent voucher activity
-- An expiry on session-key authority (handled by Swig TTL, but not by dexter-vault directly)
+**Threat: the authority inflates `pending_voucher_count` to lock the vault.** The authority can increment without decrementing, in principle stranding the counter above zero (saturating at `u32::MAX`). This cannot *permanently* freeze the buyer: `force_release` (§3.2.6) lets the buyer's own passkey clear a stuck count after a grace period, independent of the authority. The authority's worst case is delay bounded by the grace window, and it never gains access to funds, since `finalize_withdrawal` still requires the buyer's passkey. Off-chain, the facilitator only calls `settle_voucher` in response to a real session and reconciles any stranded count.
 
-**Threat: Dexter decrements without settling.** Possible. Dexter could decrement `pending_voucher_count` without actually settling a payment, effectively allowing the buyer to exit without paying. This harms Dexter (and any seller it represents), not the buyer. Out of scope for a buyer-protection model.
+**Threat: the authority decrements without settling.** Possible. The authority could decrement without settling a payment, letting the buyer exit without paying. This harms Dexter (and any seller it represents), not the buyer. Out of scope for a buyer-protection model.
 
-**Threat: counter overflow attack.** `saturating_add` caps at `u32::MAX = 4,294,967,295`. To overflow, a malicious session signer would need to send ~4 billion increment transactions, each costing transaction fees. Not economically meaningful.
+**Threat: counter overflow attack.** `saturating_add` caps at `u32::MAX = 4,294,967,295`. Reaching it would require ~4 billion increment transactions from the authority, each costing fees. Not economically meaningful, and recoverable via `force_release` regardless.
 
 **Threat: counter underflow.** Prevented by the `require!(> 0)` check. The underlying `-=` is safe given the require.
 
-**Issue #2 follow-ups:**
+**Issue #2 follow-up:**
 - Misleading error code (`NoPendingWithdrawal` for what is really `NoPendingVoucher`).
-- The "permanent lock if saturated" decision needs to be explicit. Current behavior: saturate silently. Recommended: either revert above a sanity threshold or document acceptance of the trade-off.
+
+#### 3.2.6 `force_release`
+
+**Authority required:** Passkey (WebAuthn assertion). The buyer's, not the `dexter_authority`.
+
+**State changes:**
+- Decrements `pending_voucher_count` by 1 (requires `> 0`).
+
+**Security checks:**
+- `require!(pending_voucher_count > 0, VaultError::NothingToRelease)`.
+- `require!(waited >= FORCE_RELEASE_GRACE_SECONDS)` where `waited` is measured from the buyer's `pending_withdrawal.requested_at`. `FORCE_RELEASE_GRACE_SECONDS = 7 days`.
+- Passkey assertion verifies over op-msg `b"force_release" || swig_address_bytes`.
+
+**Purpose.** The recovery path for Finding-A-class situations: a settlement that can never land would otherwise leave the counter stuck above zero and `finalize_withdrawal` permanently rejected. `force_release` lets the buyer reclaim their own gate without depending on the authority's cooperation, preserving the non-custodial guarantee that access to funds never requires Dexter.
+
+**Threat: a malicious buyer uses `force_release` to escape an open tab.** Not possible within the protected window. The grace period is the seller's guaranteed settlement window: a buyer who opens a tab, runs up charges, and signs `request_withdrawal` is rejected by `force_release` until the full grace elapses. During that entire window the seller can settle and capture the funds. The buyer only escapes if the seller fails to settle for a full 7 days, which is an abandoned claim, not a defrauded one. Who holds the key (buyer vs. Dexter) does not change this; the protection is the grace window plus reliable settlement, not the key holder.
+
+**Invariant preserved.** `force_release` decrements a counter; it moves no funds. A withdrawal still requires a separate `finalize_withdrawal` passkey signature.
+
+#### 3.2.7 `rotate_passkey` / `rotate_dexter_authority`
+
+**`rotate_passkey`.** Authority: the buyer's *current* passkey. Verifies a WebAuthn assertion over `b"rotate_passkey" || new_passkey_pubkey` and replaces `passkey_pubkey`. Lets a buyer migrate to a new authenticator without abandoning the vault. The new pubkey must be valid SEC1-compressed P-256.
+
+**`rotate_dexter_authority`.** Authority: the *current* `dexter_authority` (`has_one`). Replaces `dexter_authority` with a new non-default pubkey. Lets the facilitator rotate its session key without orphaning vaults. Touches only the authority field; the new authority cannot be `Pubkey::default()`.
+
+Neither instruction can be invoked by a third party, and neither moves funds.
 
 #### 3.2.4 `request_withdrawal`
 
@@ -314,19 +339,20 @@ Total CU usage is well under any default instruction limit. Not a DoS vector.
 | Buyer rebinds Swig after compromise | `set_swig` one-shot constraint |
 | Buyer bypasses cooling-off | `elapsed >= cooling_off_seconds` check in `finalize_withdrawal` |
 | Facilitator settles without authorization | Settlement happens via Swig session role with bounded `tokenLimit` (Swig-enforced) |
-| Replay across operations | Distinct op-msg prefix per instruction (`set_swig`, `request_withdrawal`, `finalize_withdrawal`) |
+| Replay across operations | Distinct op-msg prefix per instruction (`set_swig`, `request_withdrawal`, `finalize_withdrawal`, `force_release`, `rotate_passkey`) |
 | Cross-instruction signature substitution | `verify_passkey_signed` requires matching instruction indices in SIMD-0075 offsets |
 | Stale passkey assertion | 300-second `drift` check in `request_withdrawal` |
+| Unauthorized counter mutation (any-signer write) | `settle_voucher` `has_one = dexter_authority`: only the recorded authority can move the gate |
+| Authority permanently freezing a buyer's funds | `force_release`: buyer's passkey clears a stuck count after the grace window, independent of the authority |
 
 ### 5.2 Attacks the vault does NOT prevent (by design or by gap)
 
 | Attack | Why not | Mitigation |
 |---|---|---|
-| Dexter operationally inflates `pending_voucher_count` | Trust assumption — Dexter is trusted not to misbehave operationally | Off-chain ops controls; v1.1 may add rate limits |
-| Compromised passkey | Standard WebAuthn assumption | Hardware-backed authenticator; biometric gating; off-chain account recovery (if implemented) |
+| Dexter operationally delays settlement (inflates/holds `pending_voucher_count`) | Trust assumption: Dexter is trusted to settle in good faith | Bounded by the `force_release` grace window: the buyer recovers their gate after it elapses regardless. Worst case is delay, never a permanent freeze or fund access. |
+| Compromised passkey | Standard WebAuthn assumption | Hardware-backed authenticator; biometric gating; `rotate_passkey` for migration off a key while the buyer still controls the current one |
 | Browser substitutes operation parameters | Standard WebAuthn host-trust concern | Origin pinning at RP ID level (Recommended additions in §4.2) |
 | Snooped `request_withdrawal` replay within 300s | Lack of nonce in op-msg | v1.1 to add nonce — issue #2 |
-| Counter saturation locking vault | `saturating_add` design | Operational controls; v1.1 may add panic-decrement |
 
 ### 5.3 Out-of-scope
 
@@ -343,7 +369,7 @@ Total CU usage is well under any default instruction limit. Not a DoS vector.
 |---|---|---|---|
 | [vault#1](https://github.com/Dexter-DAO/dexter-vault/issues/1) | WebAuthn verification audit-prep (origin pinning, UP/UV flags, JSON strictness) | High | Open, pre-audit |
 | [vault#2](https://github.com/Dexter-DAO/dexter-vault/issues/2) | Replay nonce + saturating math | Medium | Open, pre-audit |
-| [facilitator#45](https://github.com/Dexter-DAO/dexter-facilitator/issues/45) | Fire-and-forget vault increment race at session-open | High | Open, pre-audit |
+| [facilitator#45](https://github.com/Dexter-DAO/dexter-facilitator/issues/45) | Fire-and-forget vault increment race at session-open | High | **Closed**. Increment confirmed on-chain before session open (fail-closed) |
 | [facilitator#46](https://github.com/Dexter-DAO/dexter-facilitator/issues/46) | Crossmint vs vault path coexistence decision capture | Low (informational) | Open |
 
 ---
@@ -404,3 +430,4 @@ Standard responsible-disclosure window: 90 days from initial report to public di
 | Version | Date | Changes |
 |---|---|---|
 | 1.0 | 2026-05-10 | Initial document. Pre-audit self-review. |
+| 1.1 | 2026-05-28 | Documented the `dexter_authority`-gated counter (`settle_voucher` `has_one`), the buyer-passkey `force_release` recovery path, and `rotate_passkey` / `rotate_dexter_authority`. |
