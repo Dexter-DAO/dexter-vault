@@ -15,6 +15,11 @@ pub struct InitializeVault<'info> {
     pub vault: Account<'info, Vault>,
     #[account(mut)]
     pub payer: Signer<'info>,
+    /// The Dexter session authority to bind to this vault. Must sign init, so
+    /// a vault can only be created bound to an authority that consented. This
+    /// key may later mutate `pending_voucher_count` (settle_voucher /
+    /// force_release) — and only this key. It can never move funds.
+    pub dexter_authority: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -40,5 +45,6 @@ pub fn handler(ctx: Context<InitializeVault>, args: InitializeVaultArgs) -> Resu
     vault.pending_voucher_count = 0;
     vault.pending_withdrawal = None;
     vault.supabase_user_id = args.supabase_user_id;
+    vault.dexter_authority = ctx.accounts.dexter_authority.key();
     Ok(())
 }

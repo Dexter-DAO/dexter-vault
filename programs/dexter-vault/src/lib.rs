@@ -46,4 +46,19 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::finalize_withdrawal::handler(ctx, args)
     }
+
+    pub fn force_release(ctx: Context<ForceRelease>, args: ForceReleaseArgs) -> Result<()> {
+        instructions::force_release::handler(ctx, args)
+    }
+
+    pub fn rotate_passkey(ctx: Context<RotatePasskey>, args: RotatePasskeyArgs) -> Result<()> {
+        instructions::rotate_passkey::handler(ctx, args)
+    }
+
+    pub fn rotate_dexter_authority(
+        ctx: Context<RotateDexterAuthority>,
+        args: RotateDexterAuthorityArgs,
+    ) -> Result<()> {
+        instructions::rotate_dexter_authority::handler(ctx, args)
+    }
 }

@@ -40,6 +40,7 @@ describe("set_swig", () => {
       .accounts({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .rpc();

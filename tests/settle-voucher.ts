@@ -28,6 +28,9 @@ describe("settle_voucher", () => {
       .accounts({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
+        // The provider wallet is the bound authority for these tests, so it
+        // can sign settle_voucher below.
+        dexterAuthority: provider.wallet.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
@@ -41,7 +44,7 @@ describe("settle_voucher", () => {
       .settleVoucher({ amount: new BN(1_000_000), increment: true })
       .accounts({
         vault: vaultPda,
-        dexterSessionSigner: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
       })
       .rpc();
 
@@ -56,7 +59,7 @@ describe("settle_voucher", () => {
       .settleVoucher({ amount: new BN(1_000_000), increment: true })
       .accounts({
         vault: vaultPda,
-        dexterSessionSigner: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
       })
       .rpc();
 
@@ -64,7 +67,7 @@ describe("settle_voucher", () => {
       .settleVoucher({ amount: new BN(1_000_000), increment: false })
       .accounts({
         vault: vaultPda,
-        dexterSessionSigner: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
       })
       .rpc();
 
@@ -81,7 +84,7 @@ describe("settle_voucher", () => {
         .settleVoucher({ amount: new BN(1_000_000), increment: false })
         .accounts({
           vault: vaultPda,
-          dexterSessionSigner: provider.wallet.publicKey,
+          dexterAuthority: provider.wallet.publicKey,
         })
         .rpc();
     } catch (err: any) {

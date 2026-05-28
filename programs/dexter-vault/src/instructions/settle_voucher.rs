@@ -4,9 +4,12 @@ use crate::state::*;
 
 #[derive(Accounts)]
 pub struct SettleVoucher<'info> {
-    #[account(mut)]
+    #[account(mut, has_one = dexter_authority @ VaultError::PasskeyVerificationFailed)]
     pub vault: Account<'info, Vault>,
-    pub dexter_session_signer: Signer<'info>,
+    /// Must equal the `dexter_authority` recorded on the vault at init.
+    /// `has_one` enforces this — closing Finding B (previously any signer
+    /// could mutate the counter).
+    pub dexter_authority: Signer<'info>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize)]

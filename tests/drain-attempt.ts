@@ -126,6 +126,7 @@ describe("drain-attempt (adversarial)", () => {
       .accounts({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
@@ -142,7 +143,7 @@ describe("drain-attempt (adversarial)", () => {
       .settleVoucher({ amount: new BN(2_000), increment: true })
       .accounts({
         vault: vaultPda,
-        dexterSessionSigner: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
       })
       .rpc();
     {
@@ -186,7 +187,7 @@ describe("drain-attempt (adversarial)", () => {
       .settleVoucher({ amount: new BN(2_000), increment: false })
       .accounts({
         vault: vaultPda,
-        dexterSessionSigner: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
       })
       .rpc();
     {

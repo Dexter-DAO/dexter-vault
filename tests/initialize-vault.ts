@@ -21,6 +21,10 @@ describe("initialize_vault", () => {
       program.programId
     );
 
+    const dexterAuthority = Keypair.generate();
+    const sig = await provider.connection.requestAirdrop(dexterAuthority.publicKey, 1_000_000);
+    await provider.connection.confirmTransaction(sig, "confirmed");
+
     await program.methods
       .initializeVault({
         passkeyPubkey: Array.from(passkeyPubkey),
@@ -30,8 +34,10 @@ describe("initialize_vault", () => {
       .accounts({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
+        dexterAuthority: dexterAuthority.publicKey,
         systemProgram: SystemProgram.programId,
       })
+      .signers([dexterAuthority])
       .rpc();
 
     const vault = await program.account.vault.fetch(vaultPda);
@@ -40,5 +46,6 @@ describe("initialize_vault", () => {
     expect(vault.coolingOffSeconds.toNumber()).to.equal(86400);
     expect(vault.pendingVoucherCount).to.equal(0);
     expect(vault.pendingWithdrawal).to.be.null;
+    expect(vault.dexterAuthority.toBase58()).to.equal(dexterAuthority.publicKey.toBase58());
   });
 });

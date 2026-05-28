@@ -180,3 +180,19 @@ export function finalizeWithdrawalMessage(
   buf.set(destination.toBytes(), tag.length + 8);
   return buf;
 }
+
+export function forceReleaseMessage(swigAddress: PublicKey): Uint8Array {
+  const tag = new TextEncoder().encode("force_release");
+  const buf = new Uint8Array(tag.length + 32);
+  buf.set(tag, 0);
+  buf.set(swigAddress.toBytes(), tag.length);
+  return buf;
+}
+
+export function rotatePasskeyMessage(newPasskeyPubkey: Uint8Array): Uint8Array {
+  const tag = new TextEncoder().encode("rotate_passkey");
+  const buf = new Uint8Array(tag.length + 33);
+  buf.set(tag, 0);
+  buf.set(newPasskeyPubkey, tag.length);
+  return buf;
+}

@@ -43,6 +43,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       .accounts({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
@@ -185,7 +186,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       .settleVoucher({ amount: new BN(500), increment: true })
       .accounts({
         vault: vaultPda,
-        dexterSessionSigner: provider.wallet.publicKey,
+        dexterAuthority: provider.wallet.publicKey,
       })
       .rpc();
 
