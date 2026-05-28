@@ -233,7 +233,7 @@ pub struct PendingWithdrawal {
 - Reject `request_withdrawal` if `signed_at <= vault.pending_withdrawal.requested_at`.
 - Or document that the threat is acceptable and proceed.
 
-**Threat: signed_at clock skew.** The 300-second window allows for legitimate clock drift between the browser and Solana. A malicious browser with adjusted system clock could submit assertions up to 300s in the future or past. Given the cooling-off period default is 86,400s (24 hours), a 300s skew on `requested_at` shifts the finalize-eligible time by at most 5 minutes — economically and practically immaterial.
+**Threat: signed_at clock skew.** The 300-second window allows for legitimate clock drift between the browser and Solana. A malicious browser with an adjusted system clock could submit assertions up to 300s in the future or past, shifting the finalize-eligible time by at most 5 minutes. When a non-zero cooling-off is configured this is immaterial relative to the delay. With the default cooling-off of 0 (instant), a skew only advances finalize eligibility by up to 5 minutes — but it does **not** bypass the load-bearing protection: `finalize_withdrawal` independently requires `pending_voucher_count == 0`, so no clock manipulation releases funds while a tab is open. The skew affects only *when* an already-permitted withdrawal becomes eligible, not *whether* an impermissible one can occur.
 
 #### 3.2.5 `finalize_withdrawal`
 

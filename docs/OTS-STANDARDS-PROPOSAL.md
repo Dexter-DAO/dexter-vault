@@ -1,7 +1,7 @@
 ---
 title: "Open Tabs Standard (OTS) v1.0 — Proposal"
 subtitle: "Non-custodial spending authorizations on Solana"
-date: 2026-05-10
+date: 2026-05-28
 audience: Solana Foundation, x402 Foundation, OpenWallet Foundation, protocol designers
 status: Draft v1
 ---
@@ -173,11 +173,11 @@ Sellers verify vouchers locally (microsecond latency, no chain calls). At tab cl
 
 **Verification:** Swig program's `actions.tokenSpendLimit` is checked on every spending transaction. Reference implementation verifies the role at session-open time: `swigAdapter.ts:186`.
 
-### 3.3 Cooling-off provides defense in depth
+### 3.3 Cooling-off is optional defense in depth
 
-**Claim:** Even if a buyer somehow bypasses the `pending_voucher_count` check, a 24-hour delay between `request_withdrawal` and `finalize_withdrawal` makes drain-racing impractical for streaming use cases.
+**Claim:** A configurable delay between `request_withdrawal` and `finalize_withdrawal` is available as an extra layer, but it is **not** the mechanism that protects sellers — the `pending_voucher_count` gate (§3.1) is, and it is enforced independently.
 
-**Mechanism:** `finalize_withdrawal` checks `now - requested_at >= cooling_off_seconds`. Default cooling-off is 24 hours (`86_400` seconds). Configurable per vault at initialization.
+**Mechanism:** `finalize_withdrawal` enforces two requirements separately: `pending_voucher_count == 0` AND `now - requested_at >= cooling_off_seconds`. The counter check is load-bearing; the cooling-off check is supplementary. `cooling_off_seconds` is set per vault at initialization and **defaults to 0 (instant) in the reference implementation** — the voucher gate alone blocks the only drain it needs to (mid-tab exit), which the adversarial test in §3.1 proves with cooling-off set to 0. A non-zero cooling-off remains available for deployments that want an additional delay (e.g. against a compromised passkey), at the cost of withdrawal latency.
 
 ### 3.4 Passkey signatures are verified on-chain
 
@@ -247,7 +247,7 @@ OTS is closer in spirit to a hotel hold or auth-and-capture credit card flow tha
 | Facilitator replays old voucher | Voucher `sequence` is monotonic; sellers reject stale |
 | Seller forges voucher | Vouchers signed by facilitator session key, not seller |
 | Compromised passkey | Standard WebAuthn assumptions apply (hardware-backed, biometric-gated) |
-| Cooling-off races | 24-hour default delay; configurable |
+| Buyer drains via withdrawal racing | Blocked by the `pending_voucher_count` gate regardless of cooling-off; an optional configurable cooling-off delay adds defense in depth (default 0) |
 | Tab-counter overflow | Reference uses `saturating_add` (capped at u32::MAX) — audit issue tracked |
 
 ### 5.3 Known open issues
@@ -316,7 +316,7 @@ The following are deliberately left open for the v1.0 review period:
 
 3. **Refunds.** OTS v1.0 supports refunds via facilitator-initiated `settle_voucher(decrement)` without settlement. Should refund semantics be more formally specified?
 
-4. **Cooling-off range.** Default is 24 hours. Should the spec define a minimum (e.g. 1 hour) and maximum (e.g. 30 days)? Or leave fully configurable?
+4. **Cooling-off range.** The reference implementation defaults to 0 (the voucher gate is the real protection) but allows any per-vault value. Should the spec define a recommended range for deployments that opt into a delay, or leave it fully configurable?
 
 5. **Multi-chain.** OTS v1.0 is Solana-only. Should v1.1 include a parallel EVM specification (ERC-4337 + custom validator + RIP-7212), or should EVM-OTS be a separate parallel standard?
 

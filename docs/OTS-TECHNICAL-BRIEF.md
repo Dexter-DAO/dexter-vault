@@ -1,7 +1,7 @@
 ---
 title: "Tab — Technical Brief"
 subtitle: "On-chain non-custodial spending authorizations on Solana"
-date: 2026-05-10
+date: 2026-05-28
 audience: Engineers, CTOs, technical reviewers
 status: Draft v1
 ---
@@ -32,7 +32,7 @@ The vault program (`programs/dexter-vault/src/`) exposes five instructions. The 
 pub struct Vault {
     pub passkey_pubkey: [u8; 33],            // secp256r1 WebAuthn key
     pub swig_address: Pubkey,                // bound Swig smart-wallet
-    pub cooling_off_seconds: i64,            // delay before finalize (default 86,400 = 24h)
+    pub cooling_off_seconds: i64,            // optional delay before finalize (default 0 = instant)
     pub pending_voucher_count: u32,          // outstanding tabs — the gate
     pub pending_withdrawal: Option<PendingWithdrawal>,
     pub supabase_user_id: [u8; 16],
@@ -59,11 +59,11 @@ require!(elapsed >= vault.cooling_off_seconds, VaultError::CoolingOffNotElapsed)
 require!(vault.pending_voucher_count == 0, VaultError::PendingVouchersExist);
 ```
 
-Two preconditions to release funds:
-1. Cooling-off period (default 24 hours) has elapsed since `request_withdrawal`.
+Two preconditions to release funds, enforced independently:
+1. Cooling-off period has elapsed since `request_withdrawal` — configurable per vault, **defaults to 0 (instant)** in the reference implementation.
 2. `pending_voucher_count` is zero — no tabs outstanding.
 
-The second check is the load-bearing one. The buyer's *own passkey signature* is rejected by their *own vault* if any tab is open.
+The second check is the load-bearing one. The buyer's *own passkey signature* is rejected by their *own vault* if any tab is open — and that holds with cooling-off set to 0, which is why the default is instant. Cooling-off is available as an optional delay for deployments that want one (e.g. against a compromised passkey).
 
 ---
 
@@ -76,7 +76,7 @@ These claims are checkable from the public chain and the public source repo:
 | Program is deployed on Solana mainnet | Program ID `Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc` |
 | Buyer cannot drain mid-tab | `tests/drain-attempt.ts` — explicit adversarial test, passes |
 | Buyer's own passkey gets rejected | Same test, asserts `PendingVouchersExist` error |
-| Default cooling-off is 24 hours | `passkeyVault.ts:53` — `const DEFAULT_COOLING_OFF_SECONDS = 86_400n` |
+| Default cooling-off is 0 (instant) | `passkeyVault.ts` — `const DEFAULT_COOLING_OFF_SECONDS = 0n`; the voucher gate is the protection, not the delay |
 | Session role is bounded | `swigBundle.ts:158` — `Actions.set().tokenLimit(...).programAll()` |
 | WebAuthn signatures verified on-chain | `verify/webauthn.rs` via Solana's secp256r1 sysvar (`Secp256r1SigVerify1111111111111111111111111`) |
 

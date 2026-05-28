@@ -414,7 +414,7 @@ Transaction A:
   Signers: [Dexter fee payer]
 ```
 
-Step 2 — wait `cooling_off_seconds` (default 86,400 = 24h)
+Step 2 — wait `cooling_off_seconds` (default 0 = instant; configurable per vault for an optional delay)
 
 Step 3 — finalize + transfer:
 ```
