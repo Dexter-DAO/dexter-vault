@@ -31,7 +31,7 @@ The program **does not move funds.** USDC moves out of the buyer's [Swig](https:
 - Track a pending withdrawal intent (`pending_withdrawal`).
 - Allow a withdrawal to finalize **only** when the buyer's passkey has signed it, a cooling-off window has elapsed, **and** zero tabs are outstanding.
 
-Eight instructions, one account type, plus a WebAuthn verification module. The protection is on-chain, not Dexter-specific: **any facilitator that operates a session role correctly is interoperable.**
+Nine instructions, one account type, plus a WebAuthn verification module. Eight govern spending, recovery, and key rotation; the ninth, `prove_passkey`, is a read-only proof-of-control primitive — a passkey proves it owns the vault without moving funds, the basis for non-custodial sign-in and identity. The protection is on-chain, not Dexter-specific: **any facilitator that operates a session role correctly is interoperable.**
 
 Program: **`Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc`** (Solana mainnet)
 Standard: [Open Tabs Standard v1.0](./docs/OTS-STANDARDS-PROPOSAL.md)
@@ -74,6 +74,7 @@ Charges *against* an open tab are off-chain signed receipts ("vouchers") that se
 | `force_release` | **Buyer's passkey** (secp256r1) | Buyer's recovery path: releases a tab the facilitator never settled, but only after a 7-day grace from `request_withdrawal`. Decrements the counter only, and moves no funds |
 | `rotate_passkey` | **Buyer's current passkey** | Rotates the root passkey. The current passkey must sign the new one |
 | `rotate_dexter_authority` | **Current facilitator authority** | Rotates the facilitator authority. The current authority must sign the new one |
+| `prove_passkey` | **Buyer's passkey** (secp256r1) | Read-only proof of control. Verifies the passkey signed a challenge (`"siwx_login" \|\| challenge`) and mutates nothing — no funds, no state, no signer. A verifier simulates `[secp256r1_verify, prove_passkey]`; `err == null` proves the passkey owns the vault. The non-custodial basis for sign-in / identity (the Solana analogue of EIP-1271) |
 
 ## The `Vault` Account
 
@@ -116,6 +117,8 @@ Program ID is pinned in [`Anchor.toml`](./Anchor.toml).
 ## Implementing OTS Yourself
 
 dexter-vault is *a* reference implementation, not the only allowed one. The Open Tabs Standard specifies the wallet shape, instruction surface, and security properties; any program preserving them is interoperable. Other implementations, and other facilitators against this one, are encouraged. See the [standards proposal](./docs/OTS-STANDARDS-PROPOSAL.md) for the normative requirements. MIT licensed.
+
+Dexter's own buyer-side implementation against this program lives in [`dexter-api`](https://github.com/Dexter-DAO/dexter-api) — passkey enrollment, vault provisioning, state resolution, withdrawal flows. The x402 settlement counterpart lives in [`dexter-facilitator`](https://github.com/Dexter-DAO/dexter-facilitator).
 
 ## Documentation
 
