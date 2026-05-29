@@ -62,6 +62,73 @@ A buyer's Swig smart-wallet is rooted in a passkey-secured WebAuthn key and boun
 
 Charges *against* an open tab are off-chain signed receipts ("vouchers") that sellers verify locally; only tab open and close touch the chain. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the end-to-end flow and the off-chain receipt protocol.
 
+## Tab Lifecycle
+
+One tab, end to end. The buyer's passkey signs the boundaries; the facilitator runs the meter; the vault enforces the gate.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Buyer as Buyer<br/>(passkey)
+    participant Facilitator as Facilitator<br/>(session role)
+    participant Seller as Seller API
+    participant Vault as dexter-vault
+    participant Swig as Swig wallet<br/>(buyer's USDC)
+
+    Note over Buyer,Swig: Tab opens — on-chain, confirmed before any charge
+    Buyer->>Facilitator: open session
+    Facilitator->>Vault: settle_voucher(increment=true)
+    Vault-->>Facilitator: confirmed, count: 0→1
+    Note over Vault: withdrawal gate now CLOSED
+
+    Note over Buyer,Seller: Charges — off-chain, no chain calls
+    loop each agent action
+        Buyer->>Facilitator: charge $0.01
+        Facilitator-->>Buyer: signed voucher<br/>(channel_id, seq, cumulative)
+        Buyer->>Seller: voucher + request
+        Seller-->>Buyer: paid content
+    end
+
+    Note over Buyer,Swig: Tab closes — settlement + decrement, atomic
+    Buyer->>Facilitator: close session
+    Facilitator->>Swig: Swig::sign (transfer cumulative USDC → seller)
+    Facilitator->>Vault: settle_voucher(decrement) [same tx]
+    Vault-->>Facilitator: count: 1→0
+    Note over Vault: withdrawal gate OPEN again
+```
+
+The three on-chain hops carry the whole protocol: open (increment, gate closes), close (Swig transfer + decrement in one transaction, gate opens), and withdraw when the buyer wants out (passkey-signed, blocked while count > 0). Everything in between is off-chain signed receipts.
+
+## Withdrawal Gate
+
+The load-bearing invariant, drawn as state. `pending_voucher_count` is the only thing standing between the buyer's passkey and their USDC.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: initialize_vault<br/>set_swig
+
+    Idle --> TabOpen: settle_voucher<br/>(increment, dexter_authority)
+    TabOpen --> Idle: settle_voucher<br/>(decrement, dexter_authority)
+
+    Idle --> WithdrawalRequested: request_withdrawal<br/>(passkey)
+    WithdrawalRequested --> Idle: finalize_withdrawal<br/>(passkey, count == 0)
+
+    TabOpen --> StuckWithdrawal: request_withdrawal<br/>(passkey)
+    StuckWithdrawal --> StuckWithdrawal: finalize_withdrawal<br/>REJECTED (count > 0)
+    StuckWithdrawal --> TabOpen: force_release<br/>(passkey, +7 days)
+
+    note right of StuckWithdrawal
+      Withdrawal blocked.
+      Buyer waits for seller to settle,
+      OR clears stuck count via
+      force_release after 7-day grace.
+      Either way, only buyer's passkey
+      can move funds.
+    end note
+```
+
+`force_release` is the recovery valve: it lets the buyer's own passkey decrement a stuck count after 7 days of seller silence, so an abandoned tab can never permanently freeze funds. It moves no money. The buyer still calls `finalize_withdrawal` separately under the normal gate.
+
 ## Instructions
 
 | Instruction | Authority | Description |
