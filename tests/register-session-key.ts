@@ -18,6 +18,7 @@ import {
   sessionRevokeMessage,
   fundFromProvider,
   P256Keypair,
+  makeTestProvider,
 } from "./helpers/secp256r1";
 
 /**
@@ -32,8 +33,7 @@ import {
  * byte-identical output to the Rust builders or every signature looks forged.
  */
 describe("register_session_key + revoke_session_key (v2 session-key layer)", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   const authority = Keypair.generate();

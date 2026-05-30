@@ -19,6 +19,7 @@ import {
   finalizeWithdrawalMessage,
   setSwigMessage,
   P256Keypair,
+  makeTestProvider,
 } from "./helpers/secp256r1";
 
 /**
@@ -32,8 +33,7 @@ import {
  *   6. User passkey signs finalize again — succeeds
  */
 describe("drain-attempt (adversarial)", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   async function buildSetSwigTx(

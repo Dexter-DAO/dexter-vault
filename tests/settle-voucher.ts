@@ -3,10 +3,10 @@ import { Program, BN } from "@coral-xyz/anchor";
 import { DexterVault } from "../target/types/dexter_vault";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { expect } from "chai";
+import { makeTestProvider } from "./helpers/secp256r1";
 
 describe("settle_voucher", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   async function provisionVault() {

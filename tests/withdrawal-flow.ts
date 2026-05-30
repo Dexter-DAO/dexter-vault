@@ -19,11 +19,12 @@ import {
   finalizeWithdrawalMessage,
   setSwigMessage,
   P256Keypair,
+  makeTestProvider,
+  pollUntilAccount,
 } from "./helpers/secp256r1";
 
 describe("withdrawal flow (request → cooling-off → finalize)", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   async function provisionVault(coolingOffSeconds: number) {
@@ -223,7 +224,12 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       [(provider.wallet as anchor.Wallet).payer]
     );
 
-    const vault = await program.account.vault.fetch(vaultPda);
+    // Read replicas can lag behind even a finalized confirmation by 1-2s.
+    // Poll the fetch until the pending_withdrawal clear propagates.
+    const vault = await pollUntilAccount(
+      () => program.account.vault.fetch(vaultPda),
+      (v) => v.pendingWithdrawal === null,
+    );
     expect(vault.pendingWithdrawal).to.be.null;
   });
 

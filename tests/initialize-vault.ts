@@ -3,10 +3,10 @@ import { Program } from "@coral-xyz/anchor";
 import { DexterVault } from "../target/types/dexter_vault";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { expect } from "chai";
+import { makeTestProvider } from "./helpers/secp256r1";
 
 describe("initialize_vault (v2)", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   it("creates a v2 vault PDA with version=2, passkey, cooling-off, identity_claim", async () => {

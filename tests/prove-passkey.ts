@@ -17,6 +17,7 @@ import {
   provePasskeyMessage,
   fundFromProvider,
   P256Keypair,
+  makeTestProvider,
 } from "./helpers/secp256r1";
 
 /**
@@ -32,8 +33,7 @@ import {
  * fee payer, a signer, or a state-changing transaction.
  */
 describe("prove_passkey (Solana-1271 / non-custodial SIWX)", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   const authority = Keypair.generate();

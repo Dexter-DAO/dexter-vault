@@ -20,6 +20,7 @@ import {
   forceReleaseMessage,
   fundFromProvider,
   P256Keypair,
+  makeTestProvider,
 } from "./helpers/secp256r1";
 
 /**
@@ -36,8 +37,7 @@ import {
  *    rejection paths are what prove the gate holds.)
  */
 describe("dexter_authority (Findings B + A)", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   // The vault's bound authority for these tests.

@@ -1,14 +1,15 @@
 import { p256 } from "@noble/curves/p256";
 import { sha256 } from "@noble/hashes/sha256";
 import {
+  Connection,
   PublicKey,
   TransactionInstruction,
   SystemProgram,
   Transaction,
-  type Connection,
   type Signer,
 } from "@solana/web3.js";
-import type { AnchorProvider } from "@coral-xyz/anchor";
+import * as anchor from "@coral-xyz/anchor";
+import { AnchorProvider } from "@coral-xyz/anchor";
 
 export const SECP256R1_PROGRAM_ID = new PublicKey(
   "Secp256r1SigVerify1111111111111111111111111"
@@ -299,4 +300,83 @@ export async function fundFromProvider(
   });
   const tx = new Transaction().add(ix);
   await provider.sendAndConfirm(tx);
+}
+
+// ── Mainnet read-after-write propagation guard ──────────────────────
+//
+// On mainnet, a tx that confirmed at `confirmed` commitment may not yet be
+// visible to the leader's bank when the very next tx in the same suite tries
+// to read the freshly-created account. The on-chain Anchor handler then
+// fails with AccountNotInitialized (error 3012 / 0xbc4) even though the
+// account was created moments ago.
+//
+// Call this after `initialize_vault` (or any account-creating tx) before the
+// next tx that depends on that account existing. It polls getAccountInfo
+// against the same connection until the account materializes.
+export async function pollUntilAccountExists(
+  connection: Connection,
+  pubkey: PublicKey,
+  timeoutMs: number = 15_000,
+  intervalMs: number = 250,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const info = await connection.getAccountInfo(pubkey, "finalized");
+    if (info) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    `pollUntilAccountExists: ${pubkey.toBase58()} did not appear within ${timeoutMs}ms`,
+  );
+}
+
+// Poll a typed Anchor account.fetch() until a predicate is satisfied.
+// Read replicas on Helius can briefly serve stale state even after a
+// `finalized` write confirmation. Use this when a test asserts a state
+// transition immediately after the tx that caused it.
+export async function pollUntilAccount<T>(
+  fetchFn: () => Promise<T>,
+  predicate: (acct: T) => boolean,
+  timeoutMs: number = 15_000,
+  intervalMs: number = 250,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let last: T | undefined;
+  while (Date.now() < deadline) {
+    last = await fetchFn();
+    if (predicate(last)) return last;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    `pollUntilAccount: predicate not satisfied within ${timeoutMs}ms (last=${JSON.stringify(last)})`,
+  );
+}
+
+// ── Test provider factory ───────────────────────────────────────────
+//
+// Tests run against MAINNET (the secp256r1 precompile is mainnet-only).
+// Anchor's default commitment is "processed", which is pre-confirmation
+// and races against propagation between RPC nodes — multi-tx tests then
+// see stale state and fail nondeterministically.
+//
+// We deliberately use `finalized` for the test suite. ~13s per tx is slow
+// but the tests run rarely and DETERMINISTIC GREEN beats fast-and-flaky.
+// Production (FE, API, MCP) still uses `confirmed`; test commitment ≠
+// product commitment is intentional — the suite tests program correctness,
+// not UX latency.
+//
+// Reads env: ANCHOR_PROVIDER_URL, ANCHOR_WALLET (same as anchor test).
+export function makeTestProvider(): AnchorProvider {
+  const url = process.env.ANCHOR_PROVIDER_URL;
+  if (!url) throw new Error("ANCHOR_PROVIDER_URL is not set");
+  const connection = new Connection(url, "finalized");
+  // anchor.Wallet.local() reads ANCHOR_WALLET
+  const wallet = (anchor as any).Wallet.local();
+  const provider = new AnchorProvider(connection, wallet, {
+    commitment: "finalized",
+    preflightCommitment: "finalized",
+    skipPreflight: false,
+  });
+  anchor.setProvider(provider);
+  return provider;
 }

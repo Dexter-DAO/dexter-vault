@@ -18,6 +18,7 @@ import {
   rotatePasskeyMessage,
   fundFromProvider,
   P256Keypair,
+  makeTestProvider,
 } from "./helpers/secp256r1";
 
 /**
@@ -30,8 +31,7 @@ import {
  *   one (session-master key rotation). A non-authority signer must be rejected.
  */
 describe("key rotation", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   const authority = Keypair.generate();

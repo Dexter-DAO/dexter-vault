@@ -16,11 +16,13 @@ import {
   signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
   setSwigMessage,
+  pollUntilAccountExists,
+  pollUntilAccount,
+  makeTestProvider,
 } from "./helpers/secp256r1";
 
 describe("set_swig", () => {
-  const provider = anchor.AnchorProvider.env();
-  anchor.setProvider(provider);
+  const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   async function provisionVault() {
@@ -44,6 +46,7 @@ describe("set_swig", () => {
         systemProgram: SystemProgram.programId,
       })
       .rpc();
+    await pollUntilAccountExists(provider.connection, vaultPda);
     return { vaultPda, keypair };
   }
 
@@ -82,7 +85,12 @@ describe("set_swig", () => {
       (provider.wallet as anchor.Wallet).payer,
     ]);
 
-    const vault = await program.account.vault.fetch(vaultPda);
+    // Read replicas can lag behind even a finalized confirmation by 1-2s.
+    // Poll the fetch until the swig binding propagates to the read side.
+    const vault = await pollUntilAccount(
+      () => program.account.vault.fetch(vaultPda),
+      (v) => v.swigAddress.toBase58() === swigAddress.toBase58(),
+    );
     expect(vault.swigAddress.toBase58()).to.equal(swigAddress.toBase58());
   });
 
@@ -106,7 +114,11 @@ describe("set_swig", () => {
       );
     } catch (err: any) {
       threw = true;
-      expect(String(err)).to.match(/PasskeyVerificationFailed/);
+      // VaultError::PasskeyVerificationFailed = anchor code 6003 (0x1773).
+      // The on-chain failure surfaces as Custom error 6003 in the tx Status;
+      // logs may be unavailable if confirmation-time error rather than preflight.
+      const errStr = String(err);
+      expect(errStr).to.match(/Custom":6003|Custom: 6003|0x1773|PasskeyVerificationFailed/);
     }
     expect(threw).to.equal(true);
 
