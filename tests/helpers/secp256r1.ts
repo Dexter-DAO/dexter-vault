@@ -196,3 +196,79 @@ export function rotatePasskeyMessage(newPasskeyPubkey: Uint8Array): Uint8Array {
   buf.set(newPasskeyPubkey, tag.length);
   return buf;
 }
+
+export function provePasskeyMessage(challenge: Uint8Array): Uint8Array {
+  if (challenge.length !== 32) throw new Error("challenge must be 32 bytes");
+  const tag = new TextEncoder().encode("siwx_login");
+  const buf = new Uint8Array(tag.length + 32);
+  buf.set(tag, 0);
+  buf.set(challenge, tag.length);
+  return buf;
+}
+
+// ── Session-key (v2) message builders ────────────────────────────────
+//
+// MUST match build_registration_message / build_revocation_message in the
+// Rust handlers byte-for-byte. If either side drifts, the precompile
+// verifies a different message than the program reconstructs and every
+// signature looks forged.
+
+/** Domain separator, 32 bytes, padded with NULs. */
+const REGISTER_DOMAIN = (() => {
+  const buf = new Uint8Array(32);
+  buf.set(new TextEncoder().encode("OTS_SESSION_REGISTER_V1"), 0);
+  return buf;
+})();
+
+const REVOKE_DOMAIN = (() => {
+  const buf = new Uint8Array(32);
+  buf.set(new TextEncoder().encode("OTS_SESSION_REVOKE_V1"), 0);
+  return buf;
+})();
+
+export interface SessionRegisterMessageArgs {
+  programId: PublicKey;
+  vaultPda: PublicKey;
+  sessionPubkey: Uint8Array;        // 32 bytes
+  maxAmount: bigint;
+  expiresAt: bigint;                 // i64 seconds
+  allowedCounterparty: PublicKey;
+  nonce: number;                     // u32
+}
+
+/** 180-byte session-registration message. See register_session_key.rs. */
+export function sessionRegisterMessage(args: SessionRegisterMessageArgs): Uint8Array {
+  if (args.sessionPubkey.length !== 32) throw new Error("sessionPubkey must be 32 bytes");
+  const buf = new Uint8Array(180);
+  const view = new DataView(buf.buffer);
+  let o = 0;
+  buf.set(REGISTER_DOMAIN, o); o += 32;
+  buf.set(args.programId.toBytes(), o); o += 32;
+  buf.set(args.vaultPda.toBytes(), o); o += 32;
+  buf.set(args.sessionPubkey, o); o += 32;
+  view.setBigUint64(o, args.maxAmount, true); o += 8;
+  view.setBigInt64(o, args.expiresAt, true); o += 8;
+  buf.set(args.allowedCounterparty.toBytes(), o); o += 32;
+  view.setUint32(o, args.nonce >>> 0, true); o += 4;
+  if (o !== 180) throw new Error(`session register message wrong length: ${o}`);
+  return buf;
+}
+
+export interface SessionRevokeMessageArgs {
+  programId: PublicKey;
+  vaultPda: PublicKey;
+  sessionPubkey: Uint8Array;        // 32 bytes; must match the active session
+}
+
+/** 128-byte session-revocation message; binds to the specific session pubkey. */
+export function sessionRevokeMessage(args: SessionRevokeMessageArgs): Uint8Array {
+  if (args.sessionPubkey.length !== 32) throw new Error("sessionPubkey must be 32 bytes");
+  const buf = new Uint8Array(128);
+  let o = 0;
+  buf.set(REVOKE_DOMAIN, o); o += 32;
+  buf.set(args.programId.toBytes(), o); o += 32;
+  buf.set(args.vaultPda.toBytes(), o); o += 32;
+  buf.set(args.sessionPubkey, o); o += 32;
+  if (o !== 128) throw new Error(`session revoke message wrong length: ${o}`);
+  return buf;
+}

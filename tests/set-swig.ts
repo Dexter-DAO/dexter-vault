@@ -24,18 +24,18 @@ describe("set_swig", () => {
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   async function provisionVault() {
-    const supabaseUserId = new Uint8Array(16);
-    crypto.getRandomValues(supabaseUserId);
+    const identityClaim = new Uint8Array(32);
+    crypto.getRandomValues(identityClaim);
     const keypair = generateP256Keypair();
     const [vaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), Buffer.from(supabaseUserId)],
+      [Buffer.from("vault"), Buffer.from(identityClaim.slice(0, 16))],
       program.programId
     );
     await program.methods
       .initializeVault({
         passkeyPubkey: Array.from(keypair.publicKey),
-        coolingOffSeconds: new BN(0),
-        supabaseUserId: Array.from(supabaseUserId),
+        coolingOffSeconds: 0,
+        identityClaim: Array.from(identityClaim),
       })
       .accounts({
         vault: vaultPda,

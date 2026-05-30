@@ -10,20 +10,20 @@ describe("settle_voucher", () => {
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
   async function provisionVault() {
-    const supabaseUserId = new Uint8Array(16);
-    crypto.getRandomValues(supabaseUserId);
+    const identityClaim = new Uint8Array(32);
+    crypto.getRandomValues(identityClaim);
     const passkeyPubkey = new Uint8Array(33);
     crypto.getRandomValues(passkeyPubkey);
     passkeyPubkey[0] = 0x02;
     const [vaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), Buffer.from(supabaseUserId)],
+      [Buffer.from("vault"), Buffer.from(identityClaim.slice(0, 16))],
       program.programId
     );
     await program.methods
       .initializeVault({
         passkeyPubkey: Array.from(passkeyPubkey),
-        coolingOffSeconds: new BN(86400),
-        supabaseUserId: Array.from(supabaseUserId),
+        coolingOffSeconds: 86_400,
+        identityClaim: Array.from(identityClaim),
       })
       .accounts({
         vault: vaultPda,
