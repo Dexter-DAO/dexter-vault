@@ -55,6 +55,7 @@ pub struct ForceReleaseArgs {
 /// moves funds — finalize_withdrawal still requires a separate passkey sig.
 pub fn handler(ctx: Context<ForceRelease>, args: ForceReleaseArgs) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
+    require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
 
     require!(vault.pending_voucher_count > 0, VaultError::NothingToRelease);
 

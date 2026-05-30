@@ -27,6 +27,7 @@ pub struct RequestWithdrawalArgs {
 
 pub fn handler(ctx: Context<RequestWithdrawal>, args: RequestWithdrawalArgs) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
+    require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
 
     let now = Clock::get()?.unix_timestamp;
     let drift = now.checked_sub(args.signed_at).unwrap_or(i64::MAX).abs();

@@ -29,6 +29,7 @@ pub fn handler(
         VaultError::PasskeyVerificationFailed
     );
     let vault = &mut ctx.accounts.vault;
+    require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
     vault.dexter_authority = args.new_dexter_authority;
     Ok(())
 }

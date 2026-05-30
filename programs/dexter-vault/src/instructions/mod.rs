@@ -6,12 +6,37 @@ pub mod finalize_withdrawal;
 pub mod force_release;
 pub mod rotate_passkey;
 pub mod rotate_dexter_authority;
+pub mod prove_passkey;
+pub mod register_session_key;
+pub mod revoke_session_key;
 
+// Glob re-exports are required by Anchor: the `#[program]` macro resolves the
+// `#[derive(Accounts)]`-generated helper modules (`__client_accounts_*`,
+// `__cpi_client_accounts_*`) through `instructions::*`, so the globs must stay.
+// They also re-export each module's `handler` fn, and since every module names
+// it `handler`, a *bare* `handler` is ambiguous — hence the warning. It is
+// harmless here: lib.rs only ever calls handlers fully-qualified
+// (`instructions::<module>::handler(...)`), so the ambiguous bare name is never
+// resolved. Suppressed explicitly rather than left noisy.
+#[allow(ambiguous_glob_reexports)]
 pub use initialize_vault::*;
+#[allow(ambiguous_glob_reexports)]
 pub use set_swig::*;
+#[allow(ambiguous_glob_reexports)]
 pub use settle_voucher::*;
+#[allow(ambiguous_glob_reexports)]
 pub use request_withdrawal::*;
+#[allow(ambiguous_glob_reexports)]
 pub use finalize_withdrawal::*;
+#[allow(ambiguous_glob_reexports)]
 pub use force_release::*;
+#[allow(ambiguous_glob_reexports)]
 pub use rotate_passkey::*;
+#[allow(ambiguous_glob_reexports)]
 pub use rotate_dexter_authority::*;
+#[allow(ambiguous_glob_reexports)]
+pub use prove_passkey::*;
+#[allow(ambiguous_glob_reexports)]
+pub use register_session_key::*;
+#[allow(ambiguous_glob_reexports)]
+pub use revoke_session_key::*;

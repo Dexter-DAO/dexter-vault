@@ -61,4 +61,22 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::rotate_dexter_authority::handler(ctx, args)
     }
+
+    pub fn prove_passkey(ctx: Context<ProvePasskey>, args: ProvePasskeyArgs) -> Result<()> {
+        instructions::prove_passkey::handler(ctx, args)
+    }
+
+    pub fn register_session_key(
+        ctx: Context<RegisterSessionKey>,
+        args: RegisterSessionKeyArgs,
+    ) -> Result<()> {
+        instructions::register_session_key::handler(ctx, args)
+    }
+
+    pub fn revoke_session_key(
+        ctx: Context<RevokeSessionKey>,
+        args: RevokeSessionKeyArgs,
+    ) -> Result<()> {
+        instructions::revoke_session_key::handler(ctx, args)
+    }
 }

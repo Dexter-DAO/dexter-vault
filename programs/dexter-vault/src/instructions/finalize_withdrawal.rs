@@ -39,9 +39,17 @@ pub fn handler(ctx: Context<FinalizeWithdrawal>, args: FinalizeWithdrawalArgs) -
     );
 
     let now = Clock::get()?.unix_timestamp;
-    let elapsed = now.saturating_sub(pending.requested_at).max(0);
-    require!(elapsed >= vault.cooling_off_seconds, VaultError::CoolingOffNotElapsed);
+    // i64 unix timestamps minus another i64 timestamp; clamp to non-negative
+    // (a future-dated `requested_at` would otherwise wrap), then promote both
+    // sides to u64 so the comparison against the u32 cooling-off field is
+    // unambiguous and overflow-safe across the full timestamp range.
+    let elapsed_secs = now.saturating_sub(pending.requested_at).max(0) as u64;
+    require!(
+        elapsed_secs >= vault.cooling_off_seconds as u64,
+        VaultError::CoolingOffNotElapsed
+    );
     require!(vault.pending_voucher_count == 0, VaultError::PendingVouchersExist);
+    require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
 
     let mut op_msg = Vec::with_capacity(b"finalize_withdrawal".len() + 8 + 32);
     op_msg.extend_from_slice(b"finalize_withdrawal");
