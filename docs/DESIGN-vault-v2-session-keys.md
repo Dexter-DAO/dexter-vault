@@ -1,6 +1,6 @@
 # Vault program v2 — session keys + layout improvements
 
-**Status:** Design open. No code yet. This document captures the decisions and open questions before any on-chain change is shipped.
+**Status:** Design APPROVED 2026-05-30. All five open decisions in §12 confirmed. Implementation can begin.
 
 **Date:** 2026-05-30
 
@@ -330,13 +330,13 @@ This belongs in the SDK design doc (`dexter-x402-sdk/docs/DESIGN-tab-streaming.m
 6. At tab close, the facilitator presents the cumulative voucher and calls the existing `settle_voucher`.
 7. The session key is discarded from buyer memory. Optionally, the buyer's passkey signs a `revoke_session_key` to explicitly tear it down on chain.
 
-## 12. Open questions
+## 12. Decisions (all CONFIRMED 2026-05-30)
 
-1. **§5 identity_claim decision.** Recommendation: rename + resize to `[u8; 32]`. Branch to confirm.
-2. **§7.1 cooling_off_seconds: u32.** Recommendation: yes. Branch to confirm.
-3. **Multi-session-per-vault.** v2 enforces single-session. If a buyer wants to open two tabs with two different sellers simultaneously, they need a multi-seller session (#5 on the roadmap). Confirming: v2 is single-session, multi-seller is future work.
-4. **Session-revocation grace.** Should `revoke_session_key` immediately invalidate or honor in-flight vouchers? Recommendation: immediate. The buyer revoked deliberately; vouchers signed after revocation are intentionally void. Sellers learn via the next voucher's failed verification.
-5. **Realloc strategy for v2 enrollment.** Existing v1 accounts simply become unreadable under v2. Re-enrollment creates fresh accounts at v2 size. No realloc dance needed because we're not migrating; we're starting over.
+1. **§5 identity_claim.** CONFIRMED: rename `supabase_user_id` → `identity_claim`, resize from `[u8; 16]` to `[u8; 32]`. Operator-defined opaque bytes; the protocol does not interpret them. Dexter continues to write Supabase UUIDs.
+2. **§7.1 cooling_off_seconds: u32.** CONFIRMED: change from `i64` to `u32`. Negative values are meaningless; u32 caps at ~136 years which is enough.
+3. **Multi-session-per-vault.** CONFIRMED: v2 enforces single-session. Multi-seller-from-one-session is future work tracked as [Dexter-DAO/dexter-vault#5](https://github.com/Dexter-DAO/dexter-vault/issues/5).
+4. **Session-revocation grace.** CONFIRMED: `revoke_session_key` is immediate. Vouchers signed after on-chain revocation are intentionally void. Sellers learn via the next voucher's failed registration verification.
+5. **Migration strategy.** CONFIRMED: reuse program ID. Existing v1 vault accounts become unreadable under v2 (`version` byte at offset 0 reads as garbage). The two existing test vaults' swigs are swept manually pre-upgrade to recover the ~$1 of USDC; the dead vault PDAs are left as zombies. No `migrate_v1_to_v2` instruction.
 
 ## 13. Next steps once this doc is approved
 
