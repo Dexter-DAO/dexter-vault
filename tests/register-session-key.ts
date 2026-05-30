@@ -16,6 +16,7 @@ import {
   buildSecp256r1VerifyInstruction,
   sessionRegisterMessage,
   sessionRevokeMessage,
+  fundFromProvider,
   P256Keypair,
 } from "./helpers/secp256r1";
 
@@ -38,8 +39,7 @@ describe("register_session_key + revoke_session_key (v2 session-key layer)", () 
   const authority = Keypair.generate();
 
   async function fund(pubkey: PublicKey) {
-    const sig = await provider.connection.requestAirdrop(pubkey, 1_000_000_000);
-    await provider.connection.confirmTransaction(sig, "confirmed");
+    await fundFromProvider(provider, pubkey);
   }
 
   before(async () => {

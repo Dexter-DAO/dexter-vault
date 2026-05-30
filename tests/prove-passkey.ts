@@ -15,6 +15,7 @@ import {
   signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
   provePasskeyMessage,
+  fundFromProvider,
   P256Keypair,
 } from "./helpers/secp256r1";
 
@@ -38,8 +39,7 @@ describe("prove_passkey (Solana-1271 / non-custodial SIWX)", () => {
   const authority = Keypair.generate();
 
   async function fund(pk: PublicKey) {
-    const sig = await provider.connection.requestAirdrop(pk, 1_000_000_000);
-    await provider.connection.confirmTransaction(sig, "confirmed");
+    await fundFromProvider(provider, pk);
   }
 
   async function provisionVault(): Promise<{ vaultPda: PublicKey; keypair: P256Keypair }> {

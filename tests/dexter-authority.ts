@@ -18,6 +18,7 @@ import {
   requestWithdrawalMessage,
   setSwigMessage,
   forceReleaseMessage,
+  fundFromProvider,
   P256Keypair,
 } from "./helpers/secp256r1";
 
@@ -43,8 +44,7 @@ describe("dexter_authority (Findings B + A)", () => {
   const authority = Keypair.generate();
 
   async function fund(pubkey: PublicKey) {
-    const sig = await provider.connection.requestAirdrop(pubkey, 1_000_000_000);
-    await provider.connection.confirmTransaction(sig, "confirmed");
+    await fundFromProvider(provider, pubkey);
   }
 
   async function provisionVault(coolingOffSeconds: number) {

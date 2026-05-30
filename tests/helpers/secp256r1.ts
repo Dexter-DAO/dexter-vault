@@ -3,7 +3,12 @@ import { sha256 } from "@noble/hashes/sha256";
 import {
   PublicKey,
   TransactionInstruction,
+  SystemProgram,
+  Transaction,
+  type Connection,
+  type Signer,
 } from "@solana/web3.js";
+import type { AnchorProvider } from "@coral-xyz/anchor";
 
 export const SECP256R1_PROGRAM_ID = new PublicKey(
   "Secp256r1SigVerify1111111111111111111111111"
@@ -271,4 +276,27 @@ export function sessionRevokeMessage(args: SessionRevokeMessageArgs): Uint8Array
   buf.set(args.sessionPubkey, o); o += 32;
   if (o !== 128) throw new Error(`session revoke message wrong length: ${o}`);
   return buf;
+}
+
+// ── Funding helper for mainnet-safe tests ───────────────────────────
+//
+// `provider.connection.requestAirdrop` returns 410 on mainnet (the API is
+// localnet-only). Tests that mint a fresh authority keypair and need it to
+// sign transactions must instead receive lamports via a SystemProgram
+// transfer from the provider's already-funded wallet. The amount only needs
+// to cover transaction fees (≪0.001 SOL); use 0.005 SOL for headroom.
+//
+// Use from a `before` or `beforeEach` hook: `await fundFromProvider(provider, authority.publicKey)`.
+export async function fundFromProvider(
+  provider: AnchorProvider,
+  recipient: PublicKey,
+  lamports: number = 5_000_000, // 0.005 SOL
+): Promise<void> {
+  const ix = SystemProgram.transfer({
+    fromPubkey: provider.wallet.publicKey,
+    toPubkey: recipient,
+    lamports,
+  });
+  const tx = new Transaction().add(ix);
+  await provider.sendAndConfirm(tx);
 }

@@ -23,9 +23,9 @@ describe("initialize_vault (v2)", () => {
       program.programId
     );
 
+    // dexter_authority is a Signer<'info> but not writable + not the payer,
+    // so the keypair just needs to sign — it doesn't need any lamports.
     const dexterAuthority = Keypair.generate();
-    const sig = await provider.connection.requestAirdrop(dexterAuthority.publicKey, 1_000_000);
-    await provider.connection.confirmTransaction(sig, "confirmed");
 
     await program.methods
       .initializeVault({
