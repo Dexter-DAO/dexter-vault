@@ -25,7 +25,7 @@ describe("settle_voucher", () => {
         coolingOffSeconds: 86_400,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         // The provider wallet is the bound authority for these tests, so it
@@ -42,7 +42,7 @@ describe("settle_voucher", () => {
 
     await program.methods
       .settleVoucher({ amount: new BN(1_000_000), increment: true })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
       })
@@ -57,7 +57,7 @@ describe("settle_voucher", () => {
 
     await program.methods
       .settleVoucher({ amount: new BN(1_000_000), increment: true })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
       })
@@ -65,7 +65,7 @@ describe("settle_voucher", () => {
 
     await program.methods
       .settleVoucher({ amount: new BN(1_000_000), increment: false })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
       })
@@ -82,7 +82,7 @@ describe("settle_voucher", () => {
     try {
       await program.methods
         .settleVoucher({ amount: new BN(1_000_000), increment: false })
-        .accounts({
+        .accountsPartial({
           vault: vaultPda,
           dexterAuthority: provider.wallet.publicKey,
         })

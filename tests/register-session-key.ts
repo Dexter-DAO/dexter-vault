@@ -60,7 +60,7 @@ describe("register_session_key + revoke_session_key (v2 session-key layer)", () 
         coolingOffSeconds: 0,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         dexterAuthority: authority.publicKey,
@@ -117,7 +117,7 @@ describe("register_session_key + revoke_session_key (v2 session-key layer)", () 
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({ vault: args.vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: args.vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     const tx = new Transaction().add(precompileIx, vaultIx);
     const sig = await provider.sendAndConfirm(tx);
@@ -269,7 +269,7 @@ describe("register_session_key + revoke_session_key (v2 session-key layer)", () 
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({ vault: args.vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: args.vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     const tx = new Transaction().add(precompileIx, vaultIx);
     const sig = await provider.sendAndConfirm(tx);
@@ -366,7 +366,7 @@ describe("register_session_key + revoke_session_key (v2 session-key layer)", () 
         clientDataJson: Buffer.from(oldSigned.clientDataJSON),
         authenticatorData: Buffer.from(oldSigned.authenticatorData),
       })
-      .accounts({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     const tx = new Transaction().add(precompileIx, vaultIx);
     try {

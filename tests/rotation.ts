@@ -54,7 +54,7 @@ describe("key rotation", () => {
         coolingOffSeconds: 0,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         dexterAuthority: authority.publicKey,
@@ -89,7 +89,7 @@ describe("key rotation", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     return new Transaction().add(precompileIx, vaultIx);
   }
@@ -136,7 +136,7 @@ describe("key rotation", () => {
 
     await program.methods
       .rotateDexterAuthority({ newDexterAuthority: newAuthority.publicKey })
-      .accounts({ vault: vaultPda, dexterAuthority: authority.publicKey })
+      .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
       .signers([authority])
       .rpc();
 
@@ -148,7 +148,7 @@ describe("key rotation", () => {
     try {
       await program.methods
         .settleVoucher({ amount: new BN(1), increment: true })
-        .accounts({ vault: vaultPda, dexterAuthority: authority.publicKey })
+        .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
         .signers([authority])
         .rpc();
     } catch {
@@ -166,7 +166,7 @@ describe("key rotation", () => {
     try {
       await program.methods
         .rotateDexterAuthority({ newDexterAuthority: attacker.publicKey })
-        .accounts({ vault: vaultPda, dexterAuthority: attacker.publicKey })
+        .accountsPartial({ vault: vaultPda, dexterAuthority: attacker.publicKey })
         .signers([attacker])
         .rpc();
     } catch (err: any) {

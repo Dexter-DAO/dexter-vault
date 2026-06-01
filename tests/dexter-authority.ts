@@ -61,7 +61,7 @@ describe("dexter_authority (Findings B + A)", () => {
         coolingOffSeconds,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         dexterAuthority: authority.publicKey,
@@ -88,7 +88,7 @@ describe("dexter_authority (Findings B + A)", () => {
     const { vaultPda } = await provisionVault(0);
     await program.methods
       .settleVoucher({ amount: new BN(1_000_000), increment: true })
-      .accounts({ vault: vaultPda, dexterAuthority: authority.publicKey })
+      .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
       .signers([authority])
       .rpc();
     const vault = await program.account.vault.fetch(vaultPda);
@@ -104,7 +104,7 @@ describe("dexter_authority (Findings B + A)", () => {
     try {
       await program.methods
         .settleVoucher({ amount: new BN(1_000_000), increment: false })
-        .accounts({ vault: vaultPda, dexterAuthority: attacker.publicKey })
+        .accountsPartial({ vault: vaultPda, dexterAuthority: attacker.publicKey })
         .signers([attacker])
         .rpc();
     } catch (err: any) {
@@ -136,7 +136,7 @@ describe("dexter_authority (Findings B + A)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     const tx = new Transaction().add(precompileIx, vaultIx);
     await sendAndConfirmTransaction(provider.connection, tx, [
@@ -167,7 +167,7 @@ describe("dexter_authority (Findings B + A)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     const tx = new Transaction().add(precompileIx, vaultIx);
     await sendAndConfirmTransaction(provider.connection, tx, [
@@ -194,7 +194,7 @@ describe("dexter_authority (Findings B + A)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     return new Transaction().add(precompileIx, vaultIx);
   }
@@ -223,7 +223,7 @@ describe("dexter_authority (Findings B + A)", () => {
     // Stick the count (authority opens a tab).
     await program.methods
       .settleVoucher({ amount: new BN(1_000_000), increment: true })
-      .accounts({ vault: vaultPda, dexterAuthority: authority.publicKey })
+      .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
       .signers([authority])
       .rpc();
     // Buyer requests withdrawal NOW — well within grace.
@@ -253,7 +253,7 @@ describe("dexter_authority (Findings B + A)", () => {
     const swig = await bindSwig(vaultPda, keypair);
     await program.methods
       .settleVoucher({ amount: new BN(1_000_000), increment: true })
-      .accounts({ vault: vaultPda, dexterAuthority: authority.publicKey })
+      .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
       .signers([authority])
       .rpc();
     const now = BigInt(Math.floor(Date.now() / 1000));

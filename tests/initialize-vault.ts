@@ -33,7 +33,7 @@ describe("initialize_vault (v2)", () => {
         coolingOffSeconds: 86_400,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         dexterAuthority: dexterAuthority.publicKey,

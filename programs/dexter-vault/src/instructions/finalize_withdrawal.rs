@@ -1,15 +1,45 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::sysvar;
 
+use crate::constants::{SWIG_PROGRAM_ID, SWIG_WALLET_ADDRESS_SEED};
 use crate::state::*;
 use crate::verify::webauthn::verify_passkey_signed;
 
 #[derive(Accounts)]
 pub struct FinalizeWithdrawal<'info> {
+    /// Position 0 — REQUIRED at this index by Swig's ProgramExec authority
+    /// validator. When a Swig::SignV2 follows this instruction in the same
+    /// transaction, Swig's on-chain validator inspects accounts[0..1] of the
+    /// preceding instruction and rejects unless they're [swig, swig_wallet].
+    ///
+    /// We additionally enforce `swig.key() == vault.swig_address` via the
+    /// `address` constraint so a caller cannot pass an arbitrary Swig account
+    /// in here — defense in depth: even if Swig's own validation changes in a
+    /// future program upgrade, this vault keeps its own invariant.
+    ///
+    /// CHECK: address constraint binds it to vault.swig_address; we never
+    /// deserialize or dereference it.
+    #[account(address = vault.swig_address)]
+    pub swig: AccountInfo<'info>,
+    /// Position 1 — required by Swig's ProgramExec validator (see `swig`).
+    /// The Swig wallet address is the PDA owning the SPL token ATA being
+    /// debited; it is derived under the Swig program at
+    /// `["swig-wallet-address", swig_pubkey]`.
+    ///
+    /// We independently verify the canonical derivation via Anchor's `seeds`
+    /// + `seeds::program` constraint. If a caller supplied a fake account, our
+    /// program rejects before any Swig CPI runs — we do not rely on Swig
+    /// catching it downstream.
+    ///
+    /// CHECK: PDA constraint validates derivation; not deserialized.
+    #[account(
+        seeds = [SWIG_WALLET_ADDRESS_SEED, swig.key().as_ref()],
+        bump,
+        seeds::program = SWIG_PROGRAM_ID,
+    )]
+    pub swig_wallet_address: AccountInfo<'info>,
     #[account(mut)]
     pub vault: Account<'info, Vault>,
-    /// CHECK: must match vault.swig_address.
-    pub swig: AccountInfo<'info>,
     /// CHECK: instructions sysvar — address-constrained.
     #[account(address = sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
@@ -29,13 +59,14 @@ pub fn handler(ctx: Context<FinalizeWithdrawal>, args: FinalizeWithdrawalArgs) -
         .clone()
         .ok_or(VaultError::NoPendingWithdrawal)?;
 
+    // Anchor's `address = vault.swig_address` constraint on the `swig` account
+    // already enforces that the supplied swig matches the bound address. The
+    // additional non-default check below is paranoia: if set_swig was never
+    // called, vault.swig_address is the zero Pubkey, which Anchor would happily
+    // match against a zero account. Fail fast and explicit.
     require!(
         vault.swig_address != Pubkey::default(),
         VaultError::NoPendingWithdrawal
-    );
-    require!(
-        ctx.accounts.swig.key() == vault.swig_address,
-        VaultError::PasskeyVerificationFailed
     );
 
     let now = Clock::get()?.unix_timestamp;

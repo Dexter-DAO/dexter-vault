@@ -56,7 +56,7 @@ describe("prove_passkey (Solana-1271 / non-custodial SIWX)", () => {
         coolingOffSeconds: 0,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         dexterAuthority: authority.publicKey,
@@ -96,7 +96,7 @@ describe("prove_passkey (Solana-1271 / non-custodial SIWX)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     return new Transaction().add(precompileIx, vaultIx);
   }
@@ -160,7 +160,7 @@ describe("prove_passkey (Solana-1271 / non-custodial SIWX)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+      .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
       .instruction();
     const tx = new Transaction().add(precompileIx, vaultIx);
 

@@ -50,7 +50,7 @@ describe("drain-attempt (adversarial)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
@@ -76,7 +76,7 @@ describe("drain-attempt (adversarial)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
@@ -99,7 +99,7 @@ describe("drain-attempt (adversarial)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         swig: swigAddress,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
@@ -123,7 +123,7 @@ describe("drain-attempt (adversarial)", () => {
         coolingOffSeconds: 0,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         dexterAuthority: provider.wallet.publicKey,
@@ -141,7 +141,7 @@ describe("drain-attempt (adversarial)", () => {
     // 1. Open streaming session — pending_voucher_count = 1.
     await program.methods
       .settleVoucher({ amount: new BN(2_000), increment: true })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
       })
@@ -185,7 +185,7 @@ describe("drain-attempt (adversarial)", () => {
     // 5. Dexter settles. Voucher count → 0.
     await program.methods
       .settleVoucher({ amount: new BN(2_000), increment: false })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
       })

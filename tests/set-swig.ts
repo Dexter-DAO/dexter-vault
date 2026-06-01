@@ -39,7 +39,7 @@ describe("set_swig", () => {
         coolingOffSeconds: 0,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         dexterAuthority: provider.wallet.publicKey,
@@ -68,7 +68,7 @@ describe("set_swig", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })

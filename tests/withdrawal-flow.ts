@@ -41,7 +41,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
         coolingOffSeconds,
         identityClaim: Array.from(identityClaim),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
         dexterAuthority: provider.wallet.publicKey,
@@ -62,7 +62,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
@@ -92,7 +92,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
@@ -115,7 +115,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
         clientDataJson: Buffer.from(signed.clientDataJSON),
         authenticatorData: Buffer.from(signed.authenticatorData),
       })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         swig: swigAddress,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
@@ -185,7 +185,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
 
     await program.methods
       .settleVoucher({ amount: new BN(500), increment: true })
-      .accounts({
+      .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
       })
