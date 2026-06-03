@@ -9,6 +9,7 @@ pub mod rotate_dexter_authority;
 pub mod prove_passkey;
 pub mod register_session_key;
 pub mod revoke_session_key;
+pub mod settle_tab_voucher;
 
 // Glob re-exports are required by Anchor: the `#[program]` macro resolves the
 // `#[derive(Accounts)]`-generated helper modules (`__client_accounts_*`,
@@ -40,3 +41,5 @@ pub use prove_passkey::*;
 pub use register_session_key::*;
 #[allow(ambiguous_glob_reexports)]
 pub use revoke_session_key::*;
+#[allow(ambiguous_glob_reexports)]
+pub use settle_tab_voucher::*;

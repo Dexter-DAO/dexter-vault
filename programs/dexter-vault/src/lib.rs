@@ -80,4 +80,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::revoke_session_key::handler(ctx, args)
     }
+
+    pub fn settle_tab_voucher(
+        ctx: Context<SettleTabVoucher>,
+        args: SettleTabVoucherArgs,
+    ) -> Result<()> {
+        instructions::settle_tab_voucher::handler(ctx, args)
+    }
 }
