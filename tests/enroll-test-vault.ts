@@ -95,6 +95,9 @@ import {
 const FINALIZE_WITHDRAWAL_DISCRIMINATOR = new Uint8Array([
   178, 87, 206, 68, 201, 186, 164, 232,
 ]);
+const SETTLE_TAB_VOUCHER_DISCRIMINATOR = new Uint8Array([
+  173, 22, 98, 31, 110, 129, 59, 161,
+]);
 
 // The kit/web3 type bridge swig-settle-flow.ts uses. Copied verbatim.
 function kitIxToWeb3(kitIx: any): any {
@@ -178,10 +181,15 @@ async function main() {
   console.log(`  sig: ${initSig}`);
   await pollUntilAccountExists(connection, vaultPda);
 
-  // ── 3. Create Swig with three authorities ───────────────────────
+  // ── 3. Create Swig with four authorities ────────────────────────
   // role 0 — funder Ed25519, manageAuthority only (bootstrap)
   // role 1 — ProgramExec(vault, finalize_withdrawal disc), all
   // role 2 — sessionMaster Ed25519, all (this is what the facilitator signs as)
+  // role 3 — ProgramExec(vault, settle_tab_voucher disc), all
+  //          (so the Tab SDK's close path can settle on chain via
+  //           POST /tab/settle without involving the session master).
+  //          Mirrors dexter-api/src/vault/swigBundle.ts which assigns the
+  //          same role to every production vault enrolled after 2026-06-02.
   const swigId = new Uint8Array(32);
   crypto.getRandomValues(swigId);
   const swigPdaKit = await findSwigPda(swigId);
@@ -237,6 +245,25 @@ async function main() {
   const addSessionTx = new Transaction().add(...kitInstructionsToWeb3(addSessionIxs));
   const addSessionSig = await sendAndConfirmTransaction(connection, addSessionTx, [funder]);
   console.log(`  sig: ${addSessionSig}`);
+
+  // role 3 — vault ProgramExec for settle_tab_voucher (Tab settle path)
+  console.log("\n→ add authority (role 3 = ProgramExec vault settle_tab_voucher)");
+  const swigForAdd3 = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
+  if (!swigForAdd3) throw new Error("Swig not visible pre-add-role-3");
+  const tabSettleAuthority = createProgramExecAuthorityInfo(
+    Uint8Array.from(program.programId.toBytes()),
+    SETTLE_TAB_VOUCHER_DISCRIMINATOR,
+  );
+  const addTabSettleIxs = await getAddAuthorityInstructions(
+    swigForAdd3,
+    0,
+    tabSettleAuthority,
+    Actions.set().all().get(),
+    { payer: kitAddress(funder.publicKey.toBase58()) },
+  );
+  const addTabSettleTx = new Transaction().add(...kitInstructionsToWeb3(addTabSettleIxs));
+  const addTabSettleSig = await sendAndConfirmTransaction(connection, addTabSettleTx, [funder]);
+  console.log(`  sig: ${addTabSettleSig}`);
 
   // ── 4. set_swig — passkey signs ─────────────────────────────────
   console.log("\n→ set_swig (passkey-signed)");
