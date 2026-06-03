@@ -39,10 +39,10 @@
     bn.js "^5.1.2"
     buffer-layout "^1.2.0"
 
-"@dexterai/vault@^0.1.2":
-  version "0.1.2"
-  resolved "https://registry.npmjs.org/@dexterai/vault/-/vault-0.1.2.tgz"
-  integrity sha512-DCWvVi859rygTdO62gyAv8QojXVLNUAIKec5fBLSjXpO60NTY6Fvc2daHGiDkYm9jmSXLVjJty9rtD/o8XTgvw==
+"@dexterai/vault@^0.1.3":
+  version "0.1.3"
+  resolved "https://registry.yarnpkg.com/@dexterai/vault/-/vault-0.1.3.tgz#3f8cf66131543df0f881d9a559d21ceaab880014"
+  integrity sha512-UGLE2mt7PsANNmKQ1i8BgyJj4Qb6aphLm7BYdOq+DaS3RA0zOYgitYh1ULH5JDshu/k33LmGI8kZTxXHJRtAOA==
   dependencies:
     "@noble/curves" "^1.9.7"
     "@noble/hashes" "^1.8.0"

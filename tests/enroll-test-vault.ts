@@ -70,14 +70,13 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 
-// NOTE: @dexterai/vault@0.1.2's CJS bundle has a broken bs58 import
-// (`import_bs58.default.decode` resolves to undefined because esbuild's
-// __toESM wrapper double-wraps bs58@6's namespace). The ESM bundle is fine,
-// so we dynamic-import it at runtime. This is the canonical path until the
-// package ships a 0.1.3 with the CJS bs58 access fixed. Tracked as a
-// follow-up to Task 7. typeof'd at top-level for type ergonomics.
-type BuildSwigCreationBundleFn =
-  typeof import("@dexterai/vault/instructions").buildSwigCreationBundle;
+// @dexterai/vault@0.1.3+ has a fixed CJS bundle. dexter-vault's tsconfig uses
+// `moduleResolution: node` (classic), which doesn't honor the package's
+// `exports` map for static imports of subpaths. We resolve `@dexterai/vault/
+// instructions` at runtime via indirect-eval dynamic import — bypasses TS
+// module resolution entirely and lets Node's resolver handle the subpath.
+// Type-wise the import is `any`; the script's only consumer is ts-node
+// --transpile-only, so no static-typecheck coverage is lost.
 
 import {
   generateP256Keypair,
@@ -181,13 +180,10 @@ async function main() {
   // seed production uses. We already loaded the 32-byte sessionSeed in step 0.
   const hmacKey = sessionSeed;
 
-  // Dynamic import forces Node to use the ESM bundle (CJS bundle has a bs58
-  // bug in 0.1.2). TypeScript's `module: commonjs` would otherwise downlevel
-  // `await import(...)` to `require(...)` and re-trigger the CJS path —
-  // routing through indirect-eval pins this to native dynamic import.
+  // See top-of-file comment for why this uses dynamic import via indirect eval.
   const nativeImport = new Function("p", "return import(p)") as (
     p: string,
-  ) => Promise<{ buildSwigCreationBundle: BuildSwigCreationBundleFn }>;
+  ) => Promise<any>;
   const { buildSwigCreationBundle } = await nativeImport(
     "@dexterai/vault/instructions",
   );
