@@ -70,18 +70,14 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 
-import {
-  fetchSwig,
-  findSwigPda,
-  getCreateSwigInstruction,
-  getAddAuthorityInstructions,
-} from "@swig-wallet/kit";
-import {
-  Actions,
-  createEd25519AuthorityInfo,
-  createProgramExecAuthorityInfo,
-} from "@swig-wallet/lib";
-import { address as kitAddress, createSolanaRpc } from "@solana/kit";
+// NOTE: @dexterai/vault@0.1.2's CJS bundle has a broken bs58 import
+// (`import_bs58.default.decode` resolves to undefined because esbuild's
+// __toESM wrapper double-wraps bs58@6's namespace). The ESM bundle is fine,
+// so we dynamic-import it at runtime. This is the canonical path until the
+// package ships a 0.1.3 with the CJS bs58 access fixed. Tracked as a
+// follow-up to Task 7. typeof'd at top-level for type ergonomics.
+type BuildSwigCreationBundleFn =
+  typeof import("@dexterai/vault/instructions").buildSwigCreationBundle;
 
 import {
   generateP256Keypair,
@@ -91,13 +87,6 @@ import {
   makeTestProvider,
   pollUntilAccountExists,
 } from "./helpers/secp256r1";
-
-const FINALIZE_WITHDRAWAL_DISCRIMINATOR = new Uint8Array([
-  178, 87, 206, 68, 201, 186, 164, 232,
-]);
-const SETTLE_TAB_VOUCHER_DISCRIMINATOR = new Uint8Array([
-  173, 22, 98, 31, 110, 129, 59, 161,
-]);
 
 // The kit/web3 type bridge swig-settle-flow.ts uses. Copied verbatim.
 function kitIxToWeb3(kitIx: any): any {
@@ -132,7 +121,6 @@ async function main() {
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
   const connection = provider.connection;
   const funder = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(connection.rpcEndpoint);
 
   console.log(`Funder       : ${funder.publicKey.toBase58()}`);
   console.log(`SessionMaster: ${sessionMaster.publicKey.toBase58()}`);
@@ -181,89 +169,42 @@ async function main() {
   console.log(`  sig: ${initSig}`);
   await pollUntilAccountExists(connection, vaultPda);
 
-  // ── 3. Create Swig with four authorities ────────────────────────
-  // role 0 — funder Ed25519, manageAuthority only (bootstrap)
-  // role 1 — ProgramExec(vault, finalize_withdrawal disc), all
-  // role 2 — sessionMaster Ed25519, all (this is what the facilitator signs as)
-  // role 3 — ProgramExec(vault, settle_tab_voucher disc), all
-  //          (so the Tab SDK's close path can settle on chain via
-  //           POST /tab/settle without involving the session master).
-  //          Mirrors dexter-api/src/vault/swigBundle.ts which assigns the
-  //          same role to every production vault enrolled after 2026-06-02.
-  const swigId = new Uint8Array(32);
-  crypto.getRandomValues(swigId);
-  const swigPdaKit = await findSwigPda(swigId);
-  const swigAddress = new PublicKey(String(swigPdaKit));
+  // ── 3. Create Swig with four authorities (atomic, via @dexterai/vault) ──
+  // The package's buildSwigCreationBundle is the canonical 4-role provisioning
+  // sequence used by dexter-api production enrollment. role 0 = funder
+  // manageAuthority bootstrap; role 1 = ProgramExec(vault, finalize_withdrawal);
+  // role 2 = session master Ed25519; role 3 = ProgramExec(vault,
+  // settle_tab_voucher). If the on-chain role list ever changes, it changes
+  // here in exactly one place — the test follows by definition.
+  console.log("\n→ buildSwigCreationBundle (single atomic 4-role create)");
+  // The hmacKey for swig-id derivation MUST be the same 32-byte session-master
+  // seed production uses. We already loaded the 32-byte sessionSeed in step 0.
+  const hmacKey = sessionSeed;
+
+  // Dynamic import forces Node to use the ESM bundle (CJS bundle has a bs58
+  // bug in 0.1.2). TypeScript's `module: commonjs` would otherwise downlevel
+  // `await import(...)` to `require(...)` and re-trigger the CJS path —
+  // routing through indirect-eval pins this to native dynamic import.
+  const nativeImport = new Function("p", "return import(p)") as (
+    p: string,
+  ) => Promise<{ buildSwigCreationBundle: BuildSwigCreationBundleFn }>;
+  const { buildSwigCreationBundle } = await nativeImport(
+    "@dexterai/vault/instructions",
+  );
+
+  const bundle = await buildSwigCreationBundle({
+    feePayer: funder.publicKey.toBase58(),
+    dexterMasterPubkey: sessionMaster.publicKey.toBase58(),
+    identitySeed: identityClaim,
+    hmacKey,
+  });
+  const swigAddress = new PublicKey(bundle.swigAddress);
   console.log(`Swig address : ${swigAddress.toBase58()}`);
 
-  const bootstrapAuthority = createEd25519AuthorityInfo(Uint8Array.from(funder.publicKey.toBytes()));
-  const bootstrapActions = Actions.set().manageAuthority().get();
-
-  console.log("\n→ create swig (role 0)");
-  const createSwigCtx = await getCreateSwigInstruction({
-    payer: kitAddress(funder.publicKey.toBase58()),
-    id: swigId,
-    actions: bootstrapActions,
-    authorityInfo: bootstrapAuthority,
-  });
-  const createTx = new Transaction().add(...kitInstructionsToWeb3([createSwigCtx]));
-  const createSig = await sendAndConfirmTransaction(connection, createTx, [funder]);
-  console.log(`  sig: ${createSig}`);
+  const createBundleTx = new Transaction().add(...kitInstructionsToWeb3(bundle.instructions));
+  const createBundleSig = await sendAndConfirmTransaction(connection, createBundleTx, [funder]);
+  console.log(`  sig: ${createBundleSig}`);
   await pollUntilAccountExists(connection, swigAddress);
-
-  // role 1
-  console.log("\n→ add authority (role 1 = ProgramExec vault)");
-  const swigForAdd1 = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
-  if (!swigForAdd1) throw new Error("Swig not visible post-create");
-  const vaultAuthority = createProgramExecAuthorityInfo(
-    Uint8Array.from(program.programId.toBytes()),
-    FINALIZE_WITHDRAWAL_DISCRIMINATOR,
-  );
-  const addVaultIxs = await getAddAuthorityInstructions(
-    swigForAdd1,
-    0,
-    vaultAuthority,
-    Actions.set().all().get(),
-    { payer: kitAddress(funder.publicKey.toBase58()) },
-  );
-  const addVaultTx = new Transaction().add(...kitInstructionsToWeb3(addVaultIxs));
-  const addVaultSig = await sendAndConfirmTransaction(connection, addVaultTx, [funder]);
-  console.log(`  sig: ${addVaultSig}`);
-
-  // role 2
-  console.log("\n→ add authority (role 2 = session master Ed25519)");
-  const swigForAdd2 = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
-  if (!swigForAdd2) throw new Error("Swig not visible pre-add-role-2");
-  const sessionAuthority = createEd25519AuthorityInfo(Uint8Array.from(sessionMaster.publicKey.toBytes()));
-  const addSessionIxs = await getAddAuthorityInstructions(
-    swigForAdd2,
-    0,
-    sessionAuthority,
-    Actions.set().all().get(),
-    { payer: kitAddress(funder.publicKey.toBase58()) },
-  );
-  const addSessionTx = new Transaction().add(...kitInstructionsToWeb3(addSessionIxs));
-  const addSessionSig = await sendAndConfirmTransaction(connection, addSessionTx, [funder]);
-  console.log(`  sig: ${addSessionSig}`);
-
-  // role 3 — vault ProgramExec for settle_tab_voucher (Tab settle path)
-  console.log("\n→ add authority (role 3 = ProgramExec vault settle_tab_voucher)");
-  const swigForAdd3 = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
-  if (!swigForAdd3) throw new Error("Swig not visible pre-add-role-3");
-  const tabSettleAuthority = createProgramExecAuthorityInfo(
-    Uint8Array.from(program.programId.toBytes()),
-    SETTLE_TAB_VOUCHER_DISCRIMINATOR,
-  );
-  const addTabSettleIxs = await getAddAuthorityInstructions(
-    swigForAdd3,
-    0,
-    tabSettleAuthority,
-    Actions.set().all().get(),
-    { payer: kitAddress(funder.publicKey.toBase58()) },
-  );
-  const addTabSettleTx = new Transaction().add(...kitInstructionsToWeb3(addTabSettleIxs));
-  const addTabSettleSig = await sendAndConfirmTransaction(connection, addTabSettleTx, [funder]);
-  console.log(`  sig: ${addTabSettleSig}`);
 
   // ── 4. set_swig — passkey signs ─────────────────────────────────
   console.log("\n→ set_swig (passkey-signed)");
@@ -324,7 +265,11 @@ async function main() {
     userHandleBase64: Buffer.from(userHandle).toString("base64"),
     passkeyPublicKeyBase64: Buffer.from(passkey.publicKey).toString("base64"),
     passkeyPrivateKeyBase64: Buffer.from(passkey.privateKey).toString("base64"),
-    signatures: { initialize: initSig, createSwig: createSig, addVault: addVaultSig, addSession: addSessionSig, setSwig: setSwigSig },
+    signatures: {
+      initialize: initSig,
+      swigCreationBundle: createBundleSig,
+      setSwig: setSwigSig,
+    },
   }, null, 2));
   console.log(`\nCredential written: ${credPath}`);
 
