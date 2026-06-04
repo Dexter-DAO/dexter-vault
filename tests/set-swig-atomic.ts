@@ -80,9 +80,8 @@ describe("set_swig_atomic", () => {
   // actual call inside each `it()` will throw TypeError when the export
   // is missing — that's the TDD failure we expect.
   let sdkInstructions: any;
-  let buildSetSwigAtomicInstruction: (params: {
+  let buildSetSwigAtomicFromIdentity: (params: {
     vaultPda: PublicKey;
-    swigAddress: PublicKey;
     feePayer: PublicKey;
     dexterMasterPubkey: PublicKey;
     identitySeed: Uint8Array;
@@ -97,7 +96,7 @@ describe("set_swig_atomic", () => {
 
   before(async () => {
     sdkInstructions = await nativeImport("@dexterai/vault/instructions");
-    buildSetSwigAtomicInstruction = sdkInstructions.buildSetSwigAtomicInstruction;
+    buildSetSwigAtomicFromIdentity = sdkInstructions.buildSetSwigAtomicFromIdentity;
     expectedSwigAddressFor = sdkInstructions.expectedSwigAddressFor;
 
     // Provision a fresh vault for the happy-path test in the before() hook.
@@ -140,9 +139,8 @@ describe("set_swig_atomic", () => {
       signed.precompileMessage,
     );
 
-    const setSwigAtomicIx = await buildSetSwigAtomicInstruction({
+    const setSwigAtomicIx = await buildSetSwigAtomicFromIdentity({
       vaultPda,
-      swigAddress: expectedSwig,
       feePayer: feePayer.publicKey,
       dexterMasterPubkey: dexterMaster.publicKey,
       identitySeed: identityClaim.slice(0, 16),
@@ -204,9 +202,8 @@ describe("set_swig_atomic", () => {
       await expectedSwigAddressFor(seed2.slice(0, 16), hmacKey),
     );
 
-    const tamperedIx = await buildSetSwigAtomicInstruction({
+    const tamperedIx = await buildSetSwigAtomicFromIdentity({
       vaultPda: pda2,
-      swigAddress: bogusSwig,
       feePayer: feePayer.publicKey,
       dexterMasterPubkey: dexterMaster.publicKey,
       identitySeed: seed2.slice(0, 16),
@@ -284,9 +281,8 @@ describe("set_swig_atomic", () => {
       signed.precompileMessage,
     );
 
-    const ix = await buildSetSwigAtomicInstruction({
+    const ix = await buildSetSwigAtomicFromIdentity({
       vaultPda: pda3,
-      swigAddress: expected3,
       feePayer: feePayer.publicKey,
       dexterMasterPubkey: dexterMaster.publicKey,
       identitySeed: seed3.slice(0, 16),
