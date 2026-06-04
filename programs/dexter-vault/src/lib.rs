@@ -5,6 +5,7 @@ declare_id!("Hg3wRaydFtJhYrdvYrKECacpJYDsC9Px7yKmpncj2fhc");
 pub mod constants;
 pub mod state;
 pub mod instructions;
+pub mod swig_compat;
 pub mod verify;
 
 use instructions::*;
@@ -86,5 +87,12 @@ pub mod dexter_vault {
         args: SettleTabVoucherArgs,
     ) -> Result<()> {
         instructions::settle_tab_voucher::handler(ctx, args)
+    }
+
+    pub fn set_swig_atomic(
+        ctx: Context<SetSwigAtomic>,
+        args: SetSwigAtomicArgs,
+    ) -> Result<()> {
+        instructions::set_swig_atomic::handler(ctx, args)
     }
 }
