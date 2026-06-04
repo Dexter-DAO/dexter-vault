@@ -96,7 +96,13 @@ pub struct SetSwigAtomic<'info> {
     #[account(address = SWIG_PROGRAM_ID)]
     pub swig_program: UncheckedAccount<'info>,
 
-    /// System program — Swig CreateV1 needs it to create the state account.
+    /// System program. Declared readonly at the outer-ix level — Solana's
+    /// runtime demotes the System Program to readonly anyway (program-id
+    /// accounts cannot be writable in the outer transaction). All inner CPIs
+    /// (both CreateV1 and AddAuthority) therefore pass System Program as
+    /// `AccountMeta::new_readonly(...)` to avoid privilege escalation.
+    /// `system_program::CreateAccount` itself doesn't require the System
+    /// Program account to be writable — it operates on `from`/`to`.
     pub system_program: Program<'info, System>,
 
     /// Instructions sysvar — read by verify_passkey_signed.
@@ -156,7 +162,15 @@ pub fn handler(ctx: Context<SetSwigAtomic>, args: SetSwigAtomicArgs) -> Result<(
             AccountMeta::new(swig_account, false),
             AccountMeta::new(fee_payer, true),
             AccountMeta::new(ctx.accounts.swig_wallet_address.key(), false),
-            AccountMeta::new(anchor_lang::solana_program::system_program::ID, false),
+            // System Program is passed readonly here even though the upstream
+            // swig-interface declares it writable. Solana's runtime demotes
+            // program-id accounts to readonly in the outer tx anyway, so the
+            // inner CPI MUST claim readonly to avoid privilege escalation.
+            // `system_program::CreateAccount` itself doesn't require the
+            // System Program account to be writable to function — only the
+            // `from`/`to` lamport accounts (here: fee_payer + swig_account)
+            // need to be writable, and they are.
+            AccountMeta::new_readonly(anchor_lang::solana_program::system_program::ID, false),
         ],
         data: create_data,
     };
