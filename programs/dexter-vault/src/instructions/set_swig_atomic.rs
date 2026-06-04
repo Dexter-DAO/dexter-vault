@@ -35,6 +35,17 @@ use swig_state::action::{
 };
 use swig_state::authority::AuthorityType;
 
+/// Wire-format length of a ProgramExec authority payload, mirroring upstream
+/// `ProgramExecAuthority` (state/src/authority/programexec/mod.rs):
+///   program_id (32) || prefix_len (1) || padding (7) || prefix (40, zero-padded)
+const PROGRAM_EXEC_AUTH_LEN: usize = 32 + 1 + 7 + 40;
+const PROGRAM_EXEC_MAX_PREFIX_LEN: usize = 40;
+const PROGRAM_EXEC_PREFIX_OFFSET: usize = 32 + 1 + 7;
+
+/// Wire-format length of a CreateEd25519SessionAuthority payload, mirroring
+/// upstream (state/src/authority/ed25519.rs): pubkey(32) || session_key(32) || max_session_length(8).
+const ED25519_SESSION_CREATE_LEN: usize = 32 + 32 + 8;
+
 use crate::state::*;
 use crate::swig_compat::{
     build_add_authority_v1_ed25519_acting_data, build_create_v1_data, ClientActionCompat,
@@ -189,12 +200,8 @@ pub fn handler(ctx: Context<SetSwigAtomic>, args: SetSwigAtomicArgs) -> Result<(
     // CPI 2: AddAuthority role 1 — ProgramExec(vault, finalize_withdrawal), All.
     // Account order: [swig_account, payer, system_program, authority (=fee_payer)].
     // ============================================================
-    let role1_authority_bytes: Vec<u8> = {
-        let mut buf = Vec::with_capacity(32 + 8);
-        buf.extend_from_slice(crate::ID.as_ref());
-        buf.extend_from_slice(&SWIG_MARKER_FINALIZE_WITHDRAWAL);
-        buf
-    };
+    let role1_authority_bytes =
+        build_program_exec_authority_bytes(&crate::ID.to_bytes(), &SWIG_MARKER_FINALIZE_WITHDRAWAL);
     let add_role1_data = build_add_authority_v1_ed25519_acting_data(
         0, // acting_role_id (role 0 = fee_payer)
         AuthorityType::ProgramExec,
@@ -227,10 +234,18 @@ pub fn handler(ctx: Context<SetSwigAtomic>, args: SetSwigAtomicArgs) -> Result<(
     // CPI 3: AddAuthority role 2 — Ed25519Session(dexter_master, TTL'd, token-limited).
     // Action order MUST match the TS bundle: TokenLimit first, then ProgramAll.
     // ============================================================
+    // Upstream `CreateEd25519SessionAuthority` is exactly 72 bytes:
+    //   public_key (32) || session_key (32, zero for new authority)
+    //     || max_session_length (8, LE u64).
+    // Matches @swig-wallet/lib's `createEd25519SessionAuthorityInfo`, which
+    // slices the encoder output to .slice(0, 72) (no current_session_expiration
+    // on the wire — set_into_bytes overlays only the create struct).
     let session_authority_bytes: Vec<u8> = {
-        let mut buf = Vec::with_capacity(32 + 8);
+        let mut buf = Vec::with_capacity(ED25519_SESSION_CREATE_LEN);
         buf.extend_from_slice(dexter_master.as_ref());
+        buf.extend_from_slice(&[0u8; 32]); // session_key — zero for new session-based authority
         buf.extend_from_slice(&DEFAULT_SESSION_TTL_SECONDS.to_le_bytes());
+        debug_assert_eq!(buf.len(), ED25519_SESSION_CREATE_LEN);
         buf
     };
     let add_role2_data = build_add_authority_v1_ed25519_acting_data(
@@ -270,12 +285,8 @@ pub fn handler(ctx: Context<SetSwigAtomic>, args: SetSwigAtomicArgs) -> Result<(
     // ============================================================
     // CPI 4: AddAuthority role 3 — ProgramExec(vault, settle_tab), All.
     // ============================================================
-    let role3_authority_bytes: Vec<u8> = {
-        let mut buf = Vec::with_capacity(32 + 8);
-        buf.extend_from_slice(crate::ID.as_ref());
-        buf.extend_from_slice(&SWIG_MARKER_SETTLE_TAB);
-        buf
-    };
+    let role3_authority_bytes =
+        build_program_exec_authority_bytes(&crate::ID.to_bytes(), &SWIG_MARKER_SETTLE_TAB);
     let add_role3_data = build_add_authority_v1_ed25519_acting_data(
         0,
         AuthorityType::ProgramExec,
@@ -327,4 +338,23 @@ pub fn handler(ctx: Context<SetSwigAtomic>, args: SetSwigAtomicArgs) -> Result<(
     vault.swig_address = swig_account;
 
     Ok(())
+}
+
+/// Build the 80-byte wire-format payload for a `ProgramExec` authority,
+/// matching upstream `ProgramExecAuthority::create_authority_data`
+/// (state/src/authority/programexec/mod.rs) byte-for-byte.
+///
+/// Layout: `program_id(32) || prefix_len(1) || padding(7) || prefix(40, zero-padded)`.
+/// Upstream's `set_into_bytes` rejects anything other than this exact 80-byte
+/// length with `SwigStateError::InvalidRoleData` (custom error 1003 / 0x3eb).
+fn build_program_exec_authority_bytes(program_id: &[u8; 32], prefix: &[u8]) -> Vec<u8> {
+    let prefix_len = prefix.len().min(PROGRAM_EXEC_MAX_PREFIX_LEN);
+    let mut buf = vec![0u8; PROGRAM_EXEC_AUTH_LEN];
+    buf[..32].copy_from_slice(program_id);
+    buf[32] = prefix_len as u8;
+    // bytes 33..40 are padding (already zeroed)
+    buf[PROGRAM_EXEC_PREFIX_OFFSET..PROGRAM_EXEC_PREFIX_OFFSET + prefix_len]
+        .copy_from_slice(&prefix[..prefix_len]);
+    // remaining prefix bytes already zero-padded from the initial vec![0u8; LEN]
+    buf
 }
