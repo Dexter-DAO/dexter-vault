@@ -283,6 +283,52 @@ doesn't) → use dangerouslyDisableSandbox on mainnet RPC calls.
   my `spent`. spent = tab-close settles; crystallized = locks.
 - Tighten the turnover-demo assertion `>1` → `>= ROUNDS*CLAIM/REVOLVING` (one-liner, my TODO).
 
+# ===== THREAD B PROGRESS (2026-06-05 afternoon) =====
+
+Thread B (client stack V1/180 → V2/188) executed subagent-driven, opus, TDD, two-stage
+review per task. Plan: `dexter-vault-sdk/docs/superpowers/plans/2026-06-05-thread-b-v2-registration.md`.
+
+**7 of 8 tasks DONE. Only Task 8 (live mainnet tab — THE GATE) remains.**
+
+Shipped (all commits LOCAL/UNPUSHED on `main` in each repo):
+- **@dexterai/vault**: V2 domain const, 188-byte sessionRegisterMessage, register ix carries
+  max_revolving_capacity (Borsh after nonce), SessionScope.revolvingCapacityAtomic (optional).
+  **PUBLISHED to npm: 0.4.0 then 0.4.1** (Branch authorized both publishes). 34/34 parity tests green.
+- **dexter-x402-sdk**: seller verify.ts parses V2/188 + maxRevolvingCapacity; adapter passes it to
+  both builders (default `?? maxAmountAtomic`); openTab gained optional `revolvingCapacity` (human
+  units, defaults to totalCap); dep bumped ^0.4.1. tsc clean, 280/280 tests green.
+- **dexter-facilitator**: REGISTRATION_MIN_LENGTH 180→188 + dep bump. (Branch has OTHER uncommitted
+  work here — internalSign.ts/config/docs — NOT touched.)
+
+**Design decision (Branch-approved): revolving cap is OPTIONAL, defaults to totalCap.** Ships the
+capability now, obligation opt-in, surfaces the credex lever in the API (`revolvingCapacity` below
+totalCap = force turnover>1). Field lives at 3 layers: openTab `revolvingCapacity` (human) →
+SessionScope `revolvingCapacityAtomic` (atomic) → adapter `maxRevolvingCapacity` (bigint) → program.
+
+**Custody check held under scrutiny (Branch asked):** session keys are MEMORY-ONLY and that
+STRENGTHENS non-custody (no persisted spending key = nothing to custody). Passkey is the custody
+root (only it can withdraw). Full reasoning saved to memory `vault-noncustody-session-keys`.
+
+**FORWARD NOTES (documented in code, repeated here so they survive):**
+- Phase 3 `resumeTab` (dexter-x402-sdk/src/tab/tab.ts, currently a deliberate throw-stub): when
+  implemented, READ max_revolving_capacity from chain (verify.ts parseRegistration returns it), do
+  NOT re-supply it, and NEVER persist/recover a session key — re-prompt passkey for a fresh one.
+  Breadcrumb is in the resumeTab() comment.
+- `ResumeTabOptions` will eventually want the same optional `revolvingCapacity` field openTab got
+  (today it relies on the adapter `?? maxAmountAtomic` default — safe, not a bug).
+- Polish already applied (commit 919d8de): early `revolvingCapacity > 0` guard at openTab, dropped a
+  redundant `BigInt().toString()`.
+
+**TASK 8 (THE GATE) — what's left:** prove a real V2/188 registration is accepted by the LIVE mainnet
+program through the updated SDK. Baseline `npm run prove:credex` (in dexter-vault) already does V2/188
+register+settle on mainnet and PASSED — so the program side is proven; Task 8 proves the SDK-driven
+path. Also fix dexter-vault/tests/register-session-key.ts (pre-existing V1/180 tsc error) to V2/188.
+MAINNET, ~SOL, sandbox-disabled fetch. NO program deploy (program is already correct). After green:
+Thread B unblocks Phase 1 / LockedClaim e2e.
+
+**PUSH STATUS:** Thread B commits are UNPUSHED across vault-sdk / x402-sdk / facilitator (Branch's
+call). NOTE: @dexterai/vault 0.4.0+0.4.1 ARE published to npm (public) even though git is unpushed.
+
 ## QUICK ORIENTATION FOR NEXT SESSION
 - Credex meter: DONE, mainnet, 5x proven. 9 commits c2e661b..163bbbc, UNPUSHED (Branch's call to push).
 - Strategy thesis (Endow-EVM/Solana clearing advantage): dexter-decks/thesis/2026-06-02-endow-evm-*.md
