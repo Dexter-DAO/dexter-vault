@@ -757,3 +757,58 @@ describe("revolving-meter: migration", () => {
     expect(byName("systemProgram"), "system_program account").to.not.equal(undefined);
   });
 });
+
+describe("turnover-demo: credex proof (turnover > 1)", () => {
+  const provider = (require("./helpers/secp256r1") as any).makeTestProvider();
+  // Re-bind workspace program to the mainnet test provider (same reason as the
+  // settle describe above).
+  const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
+  const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
+
+  it("same $2 capacity clears $10 of settled claims => 5x turnover", async function () {
+    this.timeout(600_000); // ~20 mainnet txs @ ~13s each
+
+    const REVOLVING = 2_000_000;   // $2 revolving capacity
+    const CLAIM = 1_000_000;       // $1 per tab
+    const ROUNDS = 10;             // 10 settled claims = $10 cleared
+
+    console.log(`\n=== CREDEX TURNOVER DEMO ===`);
+    console.log(`capacity=$${REVOLVING / 1e6}  claim=$${CLAIM / 1e6}  rounds=${ROUNDS}`);
+    console.log(`standing up settleable vault (Swig + mint + ATAs)...`);
+    const ctx = await registerSettleableVault(program, provider, {
+      maxAmount: 100_000_000,        // $100 lifetime cap (room for 10 cumulative settles)
+      maxRevolvingCapacity: REVOLVING,
+    });
+    console.log(`vault: ${ctx.vaultPda.toBase58()}`);
+
+    let cumulative = 0;
+    for (let i = 1; i <= ROUNDS; i++) {
+      // OPEN: settle_voucher(increment) raises current_outstanding by CLAIM
+      await open(program, provider, ctx.vaultPda, CLAIM);
+      let s = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
+      const outAfterOpen = s.currentOutstanding.toNumber();
+
+      // SETTLE: settle_tab_voucher with the running cumulative total.
+      // Each settle moves the delta (cumulative - spent = CLAIM) and frees
+      // current_outstanding back down.
+      cumulative += CLAIM;
+      await settle(program, provider, ctx.vaultPda, cumulative, ctx, { sequenceNumber: i });
+      s = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
+      console.log(
+        `round ${String(i).padStart(2)}: open->outstanding=$${outAfterOpen / 1e6}  ` +
+        `settle->outstanding=$${s.currentOutstanding.toNumber() / 1e6}  ` +
+        `spent=$${s.spent.toNumber() / 1e6}`
+      );
+    }
+
+    const s = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
+    const settled = s.spent.toNumber();
+    const capacity = s.maxRevolvingCapacity.toNumber();
+    const turnover = settled / capacity;
+    console.log(`\n*** CREDEX PROOF: settled=$${settled / 1e6}  capacity=$${capacity / 1e6}  turnover=${turnover}x ***\n`);
+
+    expect(settled).to.equal(ROUNDS * CLAIM);            // $10 cleared
+    expect(s.currentOutstanding.toNumber()).to.equal(0); // fully revolved
+    expect(turnover).to.be.greaterThan(1);               // THE clearing proof
+  });
+});
