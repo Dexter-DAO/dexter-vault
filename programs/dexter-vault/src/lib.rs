@@ -95,4 +95,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::set_swig_atomic::handler(ctx, args)
     }
+
+    pub fn migrate_v2_to_v3(
+        ctx: Context<MigrateV2ToV3>,
+        args: MigrateV2ToV3Args,
+    ) -> Result<()> {
+        instructions::migrate_v2_to_v3::handler(ctx, args)
+    }
 }

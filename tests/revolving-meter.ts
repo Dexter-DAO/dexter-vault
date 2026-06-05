@@ -609,3 +609,50 @@ describe("revolving-meter: version", () => {
     expect((await program.account.vault.fetch(ctx.vaultPda)).version).to.equal(3);
   });
 });
+
+describe("revolving-meter: migration", () => {
+  // IDL-presence / args-shape test ONLY — deliberately does NOT run on-chain.
+  //
+  // Why no end-to-end run: a "V2 vault" is the OLD (16-bytes-shorter) layout.
+  // This test binary initializes vaults through the CURRENT program, which
+  // writes V3 (initialize_vault sets VAULT_VERSION_V3). There is no honest way
+  // to mint a genuine V2 account from a V3-initializing program, so we do NOT
+  // fake one. Full migration verification (discriminator check, version-byte
+  // gate, +16-byte realloc, trailing zero-fill landing current_outstanding=0 +
+  // max_revolving_capacity=0, version 2->3) is exercised post-deploy against
+  // the 264 real V2 vaults on mainnet — that is the only place a true V2 buffer
+  // exists. Here we assert the instruction made it into the program surface.
+  const program = anchor.workspace.DexterVault as Program<DexterVault>;
+
+  it("migrateV2ToV3 is present in the IDL", () => {
+    const idl = program.idl as any;
+    const ix = idl.instructions.find((i: any) => i.name === "migrateV2ToV3");
+    expect(ix, "migrateV2ToV3 instruction must exist in the IDL").to.not.equal(undefined);
+  });
+
+  it("migrateV2ToV3 takes vault (writable, non-signer), dexter_authority + payer signers", () => {
+    const idl = program.idl as any;
+    const ix = idl.instructions.find((i: any) => i.name === "migrateV2ToV3");
+    const byName = (n: string) => ix.accounts.find((a: any) => a.name === n);
+
+    const vault = byName("vault");
+    expect(vault, "vault account").to.not.equal(undefined);
+    expect(vault.writable).to.equal(true);
+    expect(!!vault.signer).to.equal(false);
+
+    // Authority-gating: dexter_authority must be a signer (mirrors
+    // settle_voucher / rotate_dexter_authority).
+    const auth = byName("dexterAuthority");
+    expect(auth, "dexter_authority account").to.not.equal(undefined);
+    expect(auth.signer).to.equal(true);
+
+    // payer funds the realloc rent top-up and must sign + be writable.
+    const payer = byName("payer");
+    expect(payer, "payer account").to.not.equal(undefined);
+    expect(payer.signer).to.equal(true);
+    expect(payer.writable).to.equal(true);
+
+    // system_program present (CPI transfer for the rent top-up).
+    expect(byName("systemProgram"), "system_program account").to.not.equal(undefined);
+  });
+});
