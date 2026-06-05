@@ -573,3 +573,23 @@ describe("revolving-meter: open captures exposure", () => {
     expect(threw).to.equal(true);
   });
 });
+
+describe("revolving-meter: settle releases exposure", () => {
+  const provider = (require("./helpers/secp256r1") as any).makeTestProvider();
+  // Re-bind the workspace program to our mainnet test provider (same reason as
+  // the describes above): the "state shape" describe touches anchor.workspace
+  // before any provider is set, caching it against dead localhost. This test
+  // sends real txs and must point at the test provider.
+  const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
+  const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
+  it("settle_tab_voucher frees current_outstanding by the settle delta", async () => {
+    const ctx = await registerSessionWithCapacity(program, provider, {
+      maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
+    });
+    await open(program, provider, ctx.vaultPda, 1_000_000);
+    await settle(program, provider, ctx.vaultPda, 1_000_000, ctx);
+    const s = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
+    expect(s.currentOutstanding.toNumber()).to.equal(0);
+    expect(s.spent.toNumber()).to.equal(1_000_000);
+  });
+});

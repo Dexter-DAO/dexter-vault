@@ -180,7 +180,7 @@ pub fn handler(ctx: Context<SettleTabVoucher>, args: SettleTabVoucherArgs) -> Re
 
     // The actual increment over what's already been settled — this is what
     // the following Swig::SignV2 transfer will move.
-    let _increment = args
+    let increment = args
         .cumulative_amount
         .checked_sub(session.spent)
         .ok_or(VaultError::InvalidVoucherSignature)?;
@@ -188,6 +188,11 @@ pub fn handler(ctx: Context<SettleTabVoucher>, args: SettleTabVoucherArgs) -> Re
     // Mutate the active session in place.
     if let Some(active) = vault.active_session.as_mut() {
         active.spent = args.cumulative_amount;
+        // Release exposure: the credex meter's FALL seam. `increment` is the
+        // USDC actually moving in THIS settle (atomic with the Swig transfer
+        // that follows), so capacity frees only against money that really
+        // settled. saturating_sub guards a stranded settle (no prior open).
+        active.current_outstanding = active.current_outstanding.saturating_sub(increment);
     }
 
     // Decrement the gate counter. The MppSession path's
