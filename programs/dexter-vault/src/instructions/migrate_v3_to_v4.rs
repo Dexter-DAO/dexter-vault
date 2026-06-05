@@ -96,6 +96,30 @@ pub struct MigrateV3ToV4<'info> {
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct MigrateV3ToV4Args {}
 
+/// # DANGER — keep in lockstep with state.rs (frozen-snapshot drift)
+///
+/// `SessionRegistrationV3` and `VaultV3` below are HAND-FROZEN snapshots of the
+/// V3 on-chain layout. They exist ONLY to decode pre-V4 on-chain bytes; they are
+/// never written. They are NOT derived from state.rs — they are fully independent
+/// structs that happen to mirror the pre-V4 field order and types by hand.
+///
+/// If ANY pre-V4 field in state.rs's `Vault` or `SessionRegistration` is
+/// reordered, retyped, or has a field inserted BEFORE the V4 additions, these
+/// frozen structs MUST be updated in lockstep. The failure mode is SILENT: there
+/// is NO compile error if they drift, because these are independent structs.
+/// A drifted decoder reads the wrong bytes at the wrong offsets and CORRUPTS live
+/// vault accounts on migration.
+///
+/// Safe invariant:
+///   * `VaultV3` == current `Vault` MINUS the 3 V4 fields
+///     (`outstanding_locked_amount`, `total_crystallized_amount`,
+///     `total_settled_amount`).
+///   * `SessionRegistrationV3` == current `SessionRegistration` MINUS the 2 V4
+///     fields (`crystallized_cumulative`, `last_locked_sequence`).
+/// Only the V4 *additions* — which are appended at the END of each state.rs
+/// struct — may differ between these frozen snapshots and state.rs. Every
+/// pre-V4 field must match state.rs byte-for-byte, in order and type.
+///
 /// Frozen V3 layout of `SessionRegistration` = current struct MINUS the two V4
 /// fields (`crystallized_cumulative`, `last_locked_sequence`). Used ONLY to
 /// decode pre-V4 on-chain bytes; never written.
