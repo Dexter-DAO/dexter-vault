@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::sysvar;
+use anchor_spl::token::TokenAccount;
 
 use crate::constants::{SWIG_PROGRAM_ID, SWIG_WALLET_ADDRESS_SEED};
 use crate::state::*;
@@ -40,6 +41,11 @@ pub struct FinalizeWithdrawal<'info> {
     pub swig_wallet_address: AccountInfo<'info>,
     #[account(mut)]
     pub vault: Account<'info, Vault>,
+    /// The swig wallet's USDC ATA — read live to enforce the reservation
+    /// invariant per V0.3 Decision 1: post-withdrawal balance must remain
+    /// at or above `vault.outstanding_locked_amount`. The token account's
+    /// `owner` field must match the swig_wallet_address PDA.
+    pub vault_usdc_ata: Account<'info, TokenAccount>,
     /// CHECK: instructions sysvar — address-constrained.
     #[account(address = sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
@@ -83,6 +89,27 @@ pub fn handler(ctx: Context<FinalizeWithdrawal>, args: FinalizeWithdrawalArgs) -
     require!(
         vault.version == VAULT_VERSION_V4 || vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
         VaultError::UnsupportedVaultVersion
+    );
+
+    // V0.3 Decision 1: the reservation invariant. The withdrawal must not
+    // bring the vault's USDC balance below the sum of outstanding locked
+    // claims. Live read from the token account; never trust a cached field.
+    // The ATA's `owner` is cross-checked against the canonical swig wallet
+    // PDA so a caller can't smuggle a funded but unrelated ATA into the
+    // self-check.
+    require!(
+        ctx.accounts.vault_usdc_ata.owner == ctx.accounts.swig_wallet_address.key(),
+        VaultError::PasskeyVerificationFailed
+    );
+    let live_balance_after = ctx
+        .accounts
+        .vault_usdc_ata
+        .amount
+        .checked_sub(pending.amount)
+        .ok_or(VaultError::WithdrawalWouldViolateReservation)?;
+    require!(
+        live_balance_after >= vault.outstanding_locked_amount,
+        VaultError::WithdrawalWouldViolateReservation
     );
 
     let mut op_msg = Vec::with_capacity(b"finalize_withdrawal".len() + 8 + 32);
