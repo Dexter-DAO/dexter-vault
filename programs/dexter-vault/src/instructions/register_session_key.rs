@@ -77,7 +77,7 @@ pub struct RegisterSessionKeyArgs {
 pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
 
-    require!(vault.version == VAULT_VERSION_V3, VaultError::UnsupportedVaultVersion);
+    require!(vault.version == VAULT_VERSION_V4, VaultError::UnsupportedVaultVersion);
     require!(args.max_amount > 0, VaultError::SessionCapZero);
     require!(args.max_revolving_capacity > 0, VaultError::RevolvingCapacityZero);
 

@@ -50,3 +50,5 @@ pub use settle_tab_voucher::*;
 pub use set_swig_atomic::*;
 #[allow(ambiguous_glob_reexports)]
 pub use migrate_v2_to_v3::*;
+#[allow(ambiguous_glob_reexports)]
+pub use migrate_v3_to_v4::*;

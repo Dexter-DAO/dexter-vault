@@ -102,4 +102,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::migrate_v2_to_v3::handler(ctx, args)
     }
+
+    pub fn migrate_v3_to_v4(
+        ctx: Context<MigrateV3ToV4>,
+        args: MigrateV3ToV4Args,
+    ) -> Result<()> {
+        instructions::migrate_v3_to_v4::handler(ctx, args)
+    }
 }

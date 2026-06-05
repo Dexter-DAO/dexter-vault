@@ -81,7 +81,7 @@ pub fn handler(ctx: Context<FinalizeWithdrawal>, args: FinalizeWithdrawalArgs) -
     );
     require!(vault.pending_voucher_count == 0, VaultError::PendingVouchersExist);
     require!(
-        vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
+        vault.version == VAULT_VERSION_V4 || vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
         VaultError::UnsupportedVaultVersion
     );
 
