@@ -10,7 +10,7 @@ use crate::verify::webauthn::verify_passkey_signed;
 /// version in the suffix — older sessions cannot be re-used by a newer client.
 ///
 /// Layout note: 23 bytes of label + 9 NUL = 32 bytes total.
-const REGISTER_DOMAIN: &[u8; 32] = b"OTS_SESSION_REGISTER_V1\0\0\0\0\0\0\0\0\0";
+const REGISTER_DOMAIN: &[u8; 32] = b"OTS_SESSION_REGISTER_V2\0\0\0\0\0\0\0\0\0";
 
 #[derive(Accounts)]
 pub struct RegisterSessionKey<'info> {
@@ -46,6 +46,8 @@ pub struct RegisterSessionKeyArgs {
     /// program does not enforce monotonicity (a non-monotonic nonce is the
     /// buyer's own footgun, not a protocol attack).
     pub nonce: u32,
+    /// Cap the revolving meter (`current_outstanding`) is checked against.
+    pub max_revolving_capacity: u64,
     /// WebAuthn `clientDataJSON`. Its `challenge` field must base64url-decode
     /// to sha256(registration_message).
     pub client_data_json: Vec<u8>,
@@ -77,6 +79,7 @@ pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -
 
     require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
     require!(args.max_amount > 0, VaultError::SessionCapZero);
+    require!(args.max_revolving_capacity > 0, VaultError::RevolvingCapacityZero);
 
     let now = Clock::get()?.unix_timestamp;
     require!(args.expires_at > now, VaultError::SessionExpiryInPast);
@@ -86,7 +89,7 @@ pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -
         require!(existing.expires_at <= now, VaultError::SessionAlreadyActive);
     }
 
-    // Reconstruct the 180-byte registration message the passkey signed.
+    // Reconstruct the 188-byte registration message the passkey signed.
     let registration_message =
         build_registration_message(ctx.program_id, &vault.key(), &args);
 
@@ -106,16 +109,16 @@ pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -
         nonce: args.nonce,
         spent: 0,
         current_outstanding: 0,
-        max_revolving_capacity: 0,
+        max_revolving_capacity: args.max_revolving_capacity,
     });
 
     Ok(())
 }
 
-/// Deterministic 180-byte serialization of the registration message.
+/// Deterministic 188-byte serialization of the registration message.
 ///
 /// Layout (offsets, little-endian for integers):
-///   [  0..32) domain separator literal "OTS_SESSION_REGISTER_V1\0\0\0\0\0\0\0\0\0"
+///   [  0..32) domain separator literal "OTS_SESSION_REGISTER_V2\0\0\0\0\0\0\0\0\0"
 ///   [ 32..64) program ID
 ///   [ 64..96) vault PDA
 ///   [ 96..128) session_pubkey
@@ -123,8 +126,9 @@ pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -
 ///   [136..144) expires_at (i64 LE)
 ///   [144..176) allowed_counterparty
 ///   [176..180) nonce (u32 LE)
+///   [180..188) max_revolving_capacity (u64 LE)
 ///
-/// Total: 180 bytes. The seller computes this same byte sequence locally and
+/// Total: 188 bytes. The seller computes this same byte sequence locally and
 /// uses it to verify the registration's WebAuthn ceremony off-chain (one-time
 /// per session, cached for the duration).
 fn build_registration_message(
@@ -132,7 +136,7 @@ fn build_registration_message(
     vault_pda: &Pubkey,
     args: &RegisterSessionKeyArgs,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(180);
+    let mut msg = Vec::with_capacity(188);
     msg.extend_from_slice(REGISTER_DOMAIN);
     msg.extend_from_slice(program_id.as_ref());
     msg.extend_from_slice(vault_pda.as_ref());
@@ -141,6 +145,7 @@ fn build_registration_message(
     msg.extend_from_slice(&args.expires_at.to_le_bytes());
     msg.extend_from_slice(args.allowed_counterparty.as_ref());
     msg.extend_from_slice(&args.nonce.to_le_bytes());
-    debug_assert_eq!(msg.len(), 180);
+    msg.extend_from_slice(&args.max_revolving_capacity.to_le_bytes());
+    debug_assert_eq!(msg.len(), 188);
     msg
 }
