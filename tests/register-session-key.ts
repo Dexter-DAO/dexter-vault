@@ -294,9 +294,13 @@ describe("register_session_key — published @dexterai/vault 0.4.1 SDK path (V2/
       });
       expect.fail("registration with a foreign passkey should have errored");
     } catch (e: any) {
+      // Pin the specific passkey-verification error (code 6003 / 0x1773), matching
+      // the sibling passkey-rejection tests in set-swig.ts / set-swig-atomic.ts —
+      // proves the rejection is the passkey check, not some other custom error.
       expect(e.message).to.satisfy((m: string) =>
         m.includes("PasskeyVerificationFailed") ||
-        m.includes("custom program error"),
+        m.includes("6003") ||
+        m.includes("0x1773"),
       );
     }
   });
