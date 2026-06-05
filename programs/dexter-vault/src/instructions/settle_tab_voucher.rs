@@ -156,9 +156,23 @@ pub fn handler(ctx: Context<SettleTabVoucher>, args: SettleTabVoucherArgs) -> Re
     let now = Clock::get()?.unix_timestamp;
     require!(now < session.expires_at, VaultError::SessionExpiryInPast);
 
+    // XOR frontier guard (seam spec §4): a voucher's cumulative_amount must
+    // strictly exceed BOTH terminal odometers — `spent` (tab-settled history)
+    // AND `crystallized_cumulative` (locked-into-claim history). This single
+    // line enforces XOR: a voucher whose range was already locked has
+    // cumulative_amount <= crystallized_cumulative and is rejected here; a
+    // voucher whose range was already tab-settled has cumulative_amount <=
+    // spent and is rejected here. For a never-locked voucher,
+    // crystallized_cumulative == 0, so this reduces to the prior `> spent`
+    // check bit-for-bit. Rejected mechanics that this REPLACES:
+    //   - cumulative_amount > spent + crystallized_cumulative (sum) — would
+    //     wrongly reject legitimate tab-settles in a mixed-history session.
+    //   - voucher.sequence_number <= session.last_locked_sequence — would
+    //     promote sequence_number to load-bearing for security.
+    let frontier = session.spent.max(session.crystallized_cumulative);
     require!(
-        args.cumulative_amount > session.spent,
-        VaultError::InvalidVoucherSignature
+        args.cumulative_amount > frontier,
+        VaultError::LockRangeAlreadyClaimed
     );
     require!(
         args.cumulative_amount <= session.max_amount,
