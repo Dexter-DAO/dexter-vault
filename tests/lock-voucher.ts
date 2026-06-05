@@ -146,6 +146,10 @@ function voucherPayloadMessage(
 interface LockableVaultContext {
   vaultPda: PublicKey;
   sessionKeypair: Keypair;
+  /** Passkey bound to the vault at initialize_vault. Required by tests
+   *  that need to sign vault-level operations (request_withdrawal,
+   *  finalize_withdrawal) after enrollment. */
+  passkey: P256Keypair;
   /** channelId is bound to vaultPda for lock_voucher tests (the on-chain
    *  handler doesn't enforce that link, but the seam spec convention is
    *  channelId == vault for the Tab use case). */
@@ -358,6 +362,7 @@ async function enrollLockableVault(
   return {
     vaultPda,
     sessionKeypair,
+    passkey,
     channelId,
     swigAddress,
     swigWalletAddress,

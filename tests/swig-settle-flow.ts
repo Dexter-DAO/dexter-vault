@@ -315,6 +315,10 @@ describe("swig settle flow (vault.finalize_withdrawal → Swig::SignV2)", () => 
       .accountsPartial({
         vault: vaultPda,
         swig: swigAddress,
+        // V0.3 Decision 1: the swig-wallet USDC ATA is read live to enforce
+        // the reservation invariant (live_balance_after >=
+        // outstanding_locked_amount).
+        vaultUsdcAta: sourceAta,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
       .instruction();

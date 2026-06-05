@@ -89,7 +89,8 @@ describe("drain-attempt (adversarial)", () => {
     keypair: P256Keypair,
     amount: bigint,
     destination: PublicKey,
-    swigAddress: PublicKey
+    swigAddress: PublicKey,
+    vaultUsdcAta: PublicKey
   ): Promise<Transaction> {
     const opMsg = finalizeWithdrawalMessage(amount, destination);
     const signed = signOperationWithPasskey(keypair, opMsg);
@@ -102,6 +103,7 @@ describe("drain-attempt (adversarial)", () => {
       .accountsPartial({
         vault: vaultPda,
         swig: swigAddress,
+        vaultUsdcAta,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
       .instruction();
@@ -162,11 +164,16 @@ describe("drain-attempt (adversarial)", () => {
       [(provider.wallet as anchor.Wallet).payer]
     );
 
+    // Stub vault_usdc_ata — drain-attempt's fake swigAddress has no real
+    // wallet PDA / ATA. The PendingVouchersExist check fires before the new
+    // reservation gate inside the handler, but post-deploy the Anchor
+    // account-decode may fault first. Flagged for Phase 2 SDK hardening.
+    const dummyAta = Keypair.generate().publicKey;
     let threw = false;
     try {
       await sendAndConfirmTransaction(
         provider.connection,
-        await buildFinalizeTx(vaultPda, keypair, drainAmount, destination, swigAddress),
+        await buildFinalizeTx(vaultPda, keypair, drainAmount, destination, swigAddress, dummyAta),
         [(provider.wallet as anchor.Wallet).payer]
       );
     } catch (err: any) {
@@ -198,7 +205,7 @@ describe("drain-attempt (adversarial)", () => {
     // 6. Finalize succeeds.
     await sendAndConfirmTransaction(
       provider.connection,
-      await buildFinalizeTx(vaultPda, keypair, drainAmount, destination, swigAddress),
+      await buildFinalizeTx(vaultPda, keypair, drainAmount, destination, swigAddress, dummyAta),
       [(provider.wallet as anchor.Wallet).payer]
     );
 

@@ -105,7 +105,8 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
     keypair: P256Keypair,
     amount: bigint,
     destination: PublicKey,
-    swigAddress: PublicKey
+    swigAddress: PublicKey,
+    vaultUsdcAta: PublicKey
   ): Promise<Transaction> {
     const opMsg = finalizeWithdrawalMessage(amount, destination);
     const signed = signOperationWithPasskey(keypair, opMsg);
@@ -118,6 +119,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       .accountsPartial({
         vault: vaultPda,
         swig: swigAddress,
+        vaultUsdcAta,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
       .instruction();
@@ -156,11 +158,17 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       [(provider.wallet as anchor.Wallet).payer]
     );
 
+    // Stub vault_usdc_ata — these pre-existing tests are expected to reject
+    // BEFORE the new reservation gate runs (CoolingOffNotElapsed /
+    // PendingVouchersExist / NoPendingWithdrawal precede the new check).
+    // Post-deploy, account-context decode may fault before the handler runs;
+    // that's flagged for Phase 2 SDK + helper hardening per plan §1730.
+    const dummyAta = Keypair.generate().publicKey;
     let threw = false;
     try {
       await sendAndConfirmTransaction(
         provider.connection,
-        await buildFinalizeTx(vaultPda, keypair, amount, destination, swigAddress),
+        await buildFinalizeTx(vaultPda, keypair, amount, destination, swigAddress, dummyAta),
         [(provider.wallet as anchor.Wallet).payer]
       );
     } catch (err: any) {
@@ -191,11 +199,12 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       })
       .rpc();
 
+    const dummyAta = Keypair.generate().publicKey;
     let threw = false;
     try {
       await sendAndConfirmTransaction(
         provider.connection,
-        await buildFinalizeTx(vaultPda, keypair, amount, destination, swigAddress),
+        await buildFinalizeTx(vaultPda, keypair, amount, destination, swigAddress, dummyAta),
         [(provider.wallet as anchor.Wallet).payer]
       );
     } catch (err: any) {
@@ -218,9 +227,13 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       [(provider.wallet as anchor.Wallet).payer]
     );
 
+    // Stub ATA: this test will fault on the new account-deserialize step
+    // post-deploy until the fake-swig pattern is replaced with a real-swig
+    // helper. Flagged for Phase 2 (plan §1730).
+    const dummyAta = Keypair.generate().publicKey;
     await sendAndConfirmTransaction(
       provider.connection,
-      await buildFinalizeTx(vaultPda, keypair, amount, destination, swigAddress),
+      await buildFinalizeTx(vaultPda, keypair, amount, destination, swigAddress, dummyAta),
       [(provider.wallet as anchor.Wallet).payer]
     );
 
@@ -246,11 +259,12 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
       [(provider.wallet as anchor.Wallet).payer]
     );
 
+    const dummyAta = Keypair.generate().publicKey;
     let threw = false;
     try {
       await sendAndConfirmTransaction(
         provider.connection,
-        await buildFinalizeTx(vaultPda, keypair, amount, destination, fakeSwig),
+        await buildFinalizeTx(vaultPda, keypair, amount, destination, fakeSwig, dummyAta),
         [(provider.wallet as anchor.Wallet).payer]
       );
     } catch (err: any) {
