@@ -8,6 +8,10 @@ import {
   Transaction,
   type Signer,
 } from "@solana/web3.js";
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
 import * as anchor from "@coral-xyz/anchor";
 import { AnchorProvider } from "@coral-xyz/anchor";
 
@@ -350,6 +354,41 @@ export async function pollUntilAccount<T>(
   throw new Error(
     `pollUntilAccount: predicate not satisfied within ${timeoutMs}ms (last=${JSON.stringify(last)})`,
   );
+}
+
+// ── ATA creation that survives Helius replica lag ───────────────────
+//
+// `getOrCreateAssociatedTokenAccount` from @solana/spl-token has a fatal flaw
+// on a lagging read replica (Helius): it reads the ATA (miss), sends the
+// create tx via its own `sendAndConfirmTransaction` at `confirmed`, SWALLOWS
+// any error, then does ONE non-retrying read-back. If that read-back lands on
+// a replica that hasn't seen the just-confirmed create yet, it throws
+// `TokenAccountNotFoundError` even though the ATA exists. This is the exact
+// read-after-write race that makes registerSettleableVault flake.
+//
+// This helper sends the *idempotent* create-ATA instruction through the
+// provider (whose commitment is `finalized`), then POLLS getAccountInfo at
+// `finalized` until the ATA materializes — no swallowed errors, no single-shot
+// read-back. Idempotent = safe if the ATA already exists (no "already in use"
+// failure). Returns the ATA address.
+export async function createAtaIdempotentFinalized(
+  provider: AnchorProvider,
+  payer: Signer,
+  mint: PublicKey,
+  owner: PublicKey,
+  allowOwnerOffCurve = false,
+): Promise<PublicKey> {
+  const ata = getAssociatedTokenAddressSync(mint, owner, allowOwnerOffCurve);
+  const ix = createAssociatedTokenAccountIdempotentInstruction(
+    payer.publicKey,
+    ata,
+    owner,
+    mint,
+  );
+  const tx = new Transaction().add(ix);
+  await provider.sendAndConfirm(tx, [payer]);
+  await pollUntilAccountExists(provider.connection, ata);
+  return ata;
 }
 
 // ── Test provider factory ───────────────────────────────────────────

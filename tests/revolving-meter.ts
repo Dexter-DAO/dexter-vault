@@ -13,9 +13,8 @@ import {
 } from "@solana/web3.js";
 import {
   createMint,
-  getOrCreateAssociatedTokenAccount,
   mintTo,
-  getAssociatedTokenAddressSync,
+  getAccount,
 } from "@solana/spl-token";
 import { expect } from "chai";
 import {
@@ -24,6 +23,9 @@ import {
   buildSecp256r1VerifyInstruction,
   setSwigMessage,
   P256Keypair,
+  pollUntilAccountExists,
+  pollUntilAccount,
+  createAtaIdempotentFinalized,
 } from "./helpers/secp256r1";
 
 import {
@@ -424,30 +426,54 @@ async function registerSettleableVault(
   await provider.sendAndConfirm(setSwigTx);
 
   // ── Fresh mint + funded source ATA (swig wallet) + seller ATA. ────────────
+  // Every SPL-token setup step below is hardened against Helius read-replica
+  // lag. `createMint`/`mintTo` confirm at `confirmed` and then the NEXT step
+  // reads the account back; on a lagging replica that read misses and the
+  // SPL-token program / library throws (InvalidAccountData reading the mint, or
+  // TokenAccountNotFoundError reading a fresh ATA). After each account-creating
+  // tx we poll getAccountInfo at `finalized` until the account materializes,
+  // and we create ATAs with the idempotent + polled helper instead of the racy
+  // getOrCreateAssociatedTokenAccount.
   const decimals = 6; // mimic USDC
   const mint = await createMint(connection, wallet, wallet.publicKey, null, decimals);
+  // Guard: the very next thing that touches `mint` is createAtaIdempotent, whose
+  // create-ATA instruction reads the mint on-chain. If the mint hasn't
+  // propagated to the replica, that read fails with InvalidAccountData. Wait
+  // until the mint is visible at finalized before deriving/initializing ATAs.
+  await pollUntilAccountExists(connection, mint);
 
   const swigForWallet = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
   if (!swigForWallet) throw new Error("Swig not visible for wallet derivation");
   const swigWalletAddrKit = await getSwigWalletAddress(swigForWallet);
   const swigWalletAddress = new PublicKey(String(swigWalletAddrKit));
 
-  const sourceAta = getAssociatedTokenAddressSync(
+  const sourceAta = await createAtaIdempotentFinalized(
+    provider,
+    wallet,
     mint,
     swigWalletAddress,
     true /* allowOwnerOffCurve — swig wallet is a PDA */
   );
-  await getOrCreateAssociatedTokenAccount(connection, wallet, mint, swigWalletAddress, true);
 
   // Fund the source ATA with enough to cover any settle a meter test would run
   // (max_revolving_capacity is the practical ceiling on cumulative exposure).
   const FUND_AMOUNT = BigInt(Math.max(opts.maxAmount, opts.maxRevolvingCapacity)) * 4n;
   await mintTo(connection, wallet, mint, sourceAta, wallet, FUND_AMOUNT);
+  // Guard: the settle loop's first SignV2 TransferChecked debits sourceAta. If
+  // the mintTo credit hasn't propagated, the transfer underflows. Poll until
+  // the funded balance is visible at finalized.
+  await pollUntilAccount(
+    () => getAccount(connection, sourceAta, "finalized"),
+    (acct) => acct.amount >= FUND_AMOUNT,
+  );
 
   const sellerOwner = Keypair.generate().publicKey;
-  const sellerAta = (
-    await getOrCreateAssociatedTokenAccount(connection, wallet, mint, sellerOwner)
-  ).address;
+  const sellerAta = await createAtaIdempotentFinalized(
+    provider,
+    wallet,
+    mint,
+    sellerOwner
+  );
 
   // Stable per-vault channel id for the voucher payload.
   const channelId = new Uint8Array(32);
