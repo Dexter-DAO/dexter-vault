@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::sysvar;
+use anchor_spl::token::TokenAccount;
 
+use crate::constants::{SWIG_PROGRAM_ID, SWIG_WALLET_ADDRESS_SEED};
 use crate::state::*;
 use crate::verify::webauthn::verify_passkey_signed;
 
@@ -19,6 +21,26 @@ pub struct RegisterSessionKey<'info> {
     /// precompile sibling) is what authorizes the mutation.
     #[account(mut)]
     pub vault: Account<'info, Vault>,
+
+    /// The swig wallet's USDC ATA — read live to enforce the overcommit
+    /// invariant per V0.3 Decision 1: the new session's max_amount plus
+    /// the existing outstanding_locked_amount must fit within actual USDC
+    /// balance. The ATA's `owner` field is verified against the canonical
+    /// swig wallet PDA.
+    pub vault_usdc_ata: Account<'info, TokenAccount>,
+
+    /// CHECK: address constraint binds to vault.swig_address.
+    #[account(address = vault.swig_address)]
+    pub swig: AccountInfo<'info>,
+
+    /// CHECK: PDA constraint validates derivation.
+    #[account(
+        seeds = [SWIG_WALLET_ADDRESS_SEED, swig.key().as_ref()],
+        bump,
+        seeds::program = SWIG_PROGRAM_ID,
+    )]
+    pub swig_wallet_address: AccountInfo<'info>,
+
     /// CHECK: instructions sysvar — address-constrained. The previous
     /// instruction in the transaction MUST be a secp256r1_verify call whose
     /// signed message is `authenticatorData || sha256(clientDataJSON)` and
@@ -80,6 +102,23 @@ pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -
     require!(vault.version == VAULT_VERSION_V4, VaultError::UnsupportedVaultVersion);
     require!(args.max_amount > 0, VaultError::SessionCapZero);
     require!(args.max_revolving_capacity > 0, VaultError::RevolvingCapacityZero);
+
+    // V0.3 Decision 1: the overcommit invariant. A new session cap plus
+    // existing outstanding locks must not exceed vault USDC balance.
+    // The ATA's `owner` is cross-checked against the canonical swig wallet
+    // PDA so a caller can't smuggle an unrelated funded ATA into the gate.
+    require!(
+        ctx.accounts.vault_usdc_ata.owner == ctx.accounts.swig_wallet_address.key(),
+        VaultError::PasskeyVerificationFailed
+    );
+    let combined = args
+        .max_amount
+        .checked_add(vault.outstanding_locked_amount)
+        .ok_or(VaultError::SessionWouldOvercommitVault)?;
+    require!(
+        combined <= ctx.accounts.vault_usdc_ata.amount,
+        VaultError::SessionWouldOvercommitVault
+    );
 
     let now = Clock::get()?.unix_timestamp;
     require!(args.expires_at > now, VaultError::SessionExpiryInPast);
