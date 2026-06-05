@@ -80,7 +80,10 @@ pub fn handler(ctx: Context<FinalizeWithdrawal>, args: FinalizeWithdrawalArgs) -
         VaultError::CoolingOffNotElapsed
     );
     require!(vault.pending_voucher_count == 0, VaultError::PendingVouchersExist);
-    require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
+    require!(
+        vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
+        VaultError::UnsupportedVaultVersion
+    );
 
     let mut op_msg = Vec::with_capacity(b"finalize_withdrawal".len() + 8 + 32);
     op_msg.extend_from_slice(b"finalize_withdrawal");

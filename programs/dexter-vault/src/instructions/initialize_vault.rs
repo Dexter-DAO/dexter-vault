@@ -46,7 +46,7 @@ pub fn handler(ctx: Context<InitializeVault>, args: InitializeVaultArgs) -> Resu
     );
 
     let vault = &mut ctx.accounts.vault;
-    vault.version = VAULT_VERSION_V2;
+    vault.version = VAULT_VERSION_V3;
     vault.bump = ctx.bumps.vault;
     vault.passkey_pubkey = args.passkey_pubkey;
     vault.swig_address = Pubkey::default();

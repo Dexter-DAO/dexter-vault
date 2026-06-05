@@ -6,6 +6,12 @@ use anchor_lang::prelude::*;
 /// docs/DESIGN-vault-v2-session-keys.md §4 for the rationale.
 pub const VAULT_VERSION_V2: u8 = 2;
 
+/// v3 adds the credex meter fields (current_outstanding, max_revolving_capacity)
+/// to SessionRegistration, enlarging Vault::INIT_SPACE. New vaults init as v3.
+/// v2 vaults keep working on lock-only paths but cannot register a revolving
+/// (enlarged) session. See docs/superpowers/plans/2026-06-02-revolving-capacity-meter.md.
+pub const VAULT_VERSION_V3: u8 = 3;
+
 #[account]
 #[derive(InitSpace)]
 pub struct Vault {

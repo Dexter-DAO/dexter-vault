@@ -38,7 +38,10 @@ pub struct ProvePasskeyArgs {
 /// a passing simulation requires a genuine passkey signature over the challenge.
 pub fn handler(ctx: Context<ProvePasskey>, args: ProvePasskeyArgs) -> Result<()> {
     let vault = &ctx.accounts.vault;
-    require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
+    require!(
+        vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
+        VaultError::UnsupportedVaultVersion
+    );
 
     // The passkey must have signed "siwx_login" || challenge.
     let mut op_msg = Vec::with_capacity(b"siwx_login".len() + 32);

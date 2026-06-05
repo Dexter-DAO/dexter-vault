@@ -593,3 +593,19 @@ describe("revolving-meter: settle releases exposure", () => {
     expect(s.spent.toNumber()).to.equal(1_000_000);
   });
 });
+
+describe("revolving-meter: version", () => {
+  const provider = (require("./helpers/secp256r1") as any).makeTestProvider();
+  // Re-bind the workspace program to the mainnet test provider (same reason as
+  // the describes above): touching anchor.workspace before a provider is set
+  // caches it against dead localhost. registerSessionWithCapacity sends real
+  // txs (initialize_vault + register_session_key) and must use the test provider.
+  const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
+  const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
+  it("fresh vault is V3", async () => {
+    const ctx = await registerSessionWithCapacity(program, provider, {
+      maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
+    });
+    expect((await program.account.vault.fetch(ctx.vaultPda)).version).to.equal(3);
+  });
+});

@@ -134,7 +134,10 @@ pub struct SettleTabVoucherArgs {
 pub fn handler(ctx: Context<SettleTabVoucher>, args: SettleTabVoucherArgs) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
 
-    require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
+    require!(
+        vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
+        VaultError::UnsupportedVaultVersion
+    );
     require!(
         vault.swig_address != Pubkey::default(),
         VaultError::PasskeyVerificationFailed

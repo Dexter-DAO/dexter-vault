@@ -34,7 +34,10 @@ pub fn handler(ctx: Context<RotatePasskey>, args: RotatePasskeyArgs) -> Result<(
     );
 
     let vault = &mut ctx.accounts.vault;
-    require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
+    require!(
+        vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
+        VaultError::UnsupportedVaultVersion
+    );
 
     // The CURRENT passkey must sign "rotate_passkey" || new_passkey_pubkey.
     let mut op_msg = Vec::with_capacity(b"rotate_passkey".len() + 33);
