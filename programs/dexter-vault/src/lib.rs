@@ -116,4 +116,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::lock_voucher::handler(ctx, args)
     }
+
+    pub fn transfer_lock_ownership(
+        ctx: Context<TransferLockOwnership>,
+        args: TransferLockOwnershipArgs,
+    ) -> Result<()> {
+        instructions::transfer_lock_ownership::handler(ctx, args)
+    }
 }

@@ -14,6 +14,7 @@ pub mod set_swig_atomic;
 pub mod migrate_v2_to_v3;
 pub mod migrate_v3_to_v4;
 pub mod lock_voucher;
+pub mod transfer_lock_ownership;
 
 // Glob re-exports are required by Anchor: the `#[program]` macro resolves the
 // `#[derive(Accounts)]`-generated helper modules (`__client_accounts_*`,
@@ -55,3 +56,5 @@ pub use migrate_v2_to_v3::*;
 pub use migrate_v3_to_v4::*;
 #[allow(ambiguous_glob_reexports)]
 pub use lock_voucher::*;
+#[allow(ambiguous_glob_reexports)]
+pub use transfer_lock_ownership::*;
