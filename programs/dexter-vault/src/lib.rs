@@ -123,4 +123,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::transfer_lock_ownership::handler(ctx, args)
     }
+
+    pub fn recover_abandoned_lock(
+        ctx: Context<RecoverAbandonedLock>,
+        args: RecoverAbandonedLockArgs,
+    ) -> Result<()> {
+        instructions::recover_abandoned_lock::handler(ctx, args)
+    }
 }
