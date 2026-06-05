@@ -162,3 +162,48 @@ describe("revolving-meter: registration", () => {
     expect(s.spent.toNumber()).to.equal(0);
   });
 });
+
+/**
+ * Open a tab: settle_voucher with increment=true and a value `amount`. This is
+ * the credex meter's RISE seam — it raises current_outstanding on the active
+ * session, admission-capped by max_revolving_capacity.
+ */
+async function open(
+  program: Program<DexterVault>,
+  provider: anchor.AnchorProvider,
+  vaultPda: PublicKey,
+  amount: number
+): Promise<void> {
+  await program.methods
+    .settleVoucher({ amount: new anchor.BN(amount), increment: true })
+    .accountsPartial({ vault: vaultPda, dexterAuthority: provider.wallet.publicKey })
+    .rpc();
+}
+
+describe("revolving-meter: open captures exposure", () => {
+  const provider = (require("./helpers/secp256r1") as any).makeTestProvider();
+  // Re-bind the workspace program to our mainnet test provider (same reason as
+  // the "registration" describe above): the "state shape" describe touches
+  // anchor.workspace before any provider is set, caching it against dead
+  // localhost. These tests send real txs and must point at the test provider.
+  const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
+  const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
+  it("settle_voucher(increment) raises current_outstanding by amount", async () => {
+    const { vaultPda } = await registerSessionWithCapacity(program, provider, {
+      maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
+    });
+    await open(program, provider, vaultPda, 1_000_000);
+    const s = (await program.account.vault.fetch(vaultPda)).activeSession;
+    expect(s.currentOutstanding.toNumber()).to.equal(1_000_000);
+  });
+  it("rejects an open that exceeds max_revolving_capacity", async () => {
+    const { vaultPda } = await registerSessionWithCapacity(program, provider, {
+      maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
+    });
+    await open(program, provider, vaultPda, 2_000_000);
+    let threw = false;
+    try { await open(program, provider, vaultPda, 1); }
+    catch (e: any) { threw = true; expect(e.toString()).to.match(/RevolvingCapacityExceeded/); }
+    expect(threw).to.equal(true);
+  });
+});

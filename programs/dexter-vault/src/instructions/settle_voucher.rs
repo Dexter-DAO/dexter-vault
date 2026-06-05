@@ -23,10 +23,27 @@ pub fn handler(ctx: Context<SettleVoucher>, args: SettleVoucherArgs) -> Result<(
     require!(vault.version == VAULT_VERSION_V2, VaultError::UnsupportedVaultVersion);
     if args.increment {
         vault.pending_voucher_count = vault.pending_voucher_count.saturating_add(1);
+        // Capture exposure: the credex meter's RISE seam. The amount the
+        // facilitator passes at tab-open was previously discarded
+        // (`let _ = args.amount`). Now it raises live outstanding exposure,
+        // admission-capped by the session's max_revolving_capacity.
+        if let Some(session) = vault.active_session.as_mut() {
+            let new_outstanding = session
+                .current_outstanding
+                .checked_add(args.amount)
+                .ok_or(VaultError::RevolvingCapacityExceeded)?;
+            require!(
+                new_outstanding <= session.max_revolving_capacity,
+                VaultError::RevolvingCapacityExceeded
+            );
+            session.current_outstanding = new_outstanding;
+        }
     } else {
         require!(vault.pending_voucher_count > 0, VaultError::NoPendingWithdrawal);
         vault.pending_voucher_count -= 1;
+        // No meter change here: the bare-counter decrement is the non-value
+        // close marker. Real exposure release happens in settle_tab_voucher
+        // (atomic with the USDC transfer).
     }
-    let _ = args.amount;
     Ok(())
 }
