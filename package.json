@@ -2,7 +2,8 @@
   "license": "ISC",
   "scripts": {
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
-    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
+    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
+    "prove:credex": "ANCHOR_WALLET=${ANCHOR_WALLET:-$HOME/.config/solana/dexter-vault/upgrade-authority.json} ANCHOR_PROVIDER_URL=${ANCHOR_PROVIDER_URL:-https://api.mainnet-beta.solana.com} ts-mocha -p ./tsconfig.json -t 600000 tests/revolving-meter.ts -g turnover-demo"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1"
