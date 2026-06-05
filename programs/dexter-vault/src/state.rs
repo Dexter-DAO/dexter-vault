@@ -104,6 +104,65 @@ pub struct SessionRegistration {
     pub last_locked_sequence: u32,
 }
 
+/// Crystallized claim against vault USDC. Created by `lock_voucher`,
+/// transferable via `transfer_lock_ownership`, settled by
+/// `settle_locked_voucher`, reclaimed by `recover_abandoned_lock`. Independent
+/// of `active_session` after creation — see V0.3 Decision 7. State machine
+/// per V0.3 Decision 6: pending → {settled, abandoned}, both terminal one-way.
+#[account]
+#[derive(InitSpace)]
+pub struct LockedClaim {
+    /// Layout version. v0.3 is the first version.
+    pub version: u8,
+    pub bump: u8,
+    /// Vault PDA this claim is reserved against. All reservation invariants
+    /// gate on this vault's `outstanding_locked_amount`.
+    pub vault: Pubkey,
+    /// Session pubkey that signed the voucher being crystallized. Snapshot at
+    /// lock time per V0.3 Decision 7; never re-read at settlement.
+    pub session_pubkey_at_lock: [u8; 32],
+    /// Voucher payload hash — sha256 of the 44-byte canonical voucher message.
+    /// For audit / indexer correlation; not re-verified at settle.
+    pub voucher_hash: [u8; 32],
+    /// USDC amount this claim reserves against the vault. `delta` from
+    /// `voucher.cumulative_amount - session.crystallized_cumulative` at lock.
+    pub amount: u64,
+    /// Wall-clock time the lock instruction landed.
+    pub created_at: i64,
+    /// Earliest time settlement may run. If None, claim is instantly
+    /// settleable.
+    pub maturity_at: Option<i64>,
+    /// Earliest time the buyer's passkey may reclaim. If None, claim is
+    /// indefinitely buyer-irrevocable. Invariant: when both set, MUST satisfy
+    /// `holder_recovery_at > maturity_at` per V0.3 Decision 4.
+    pub holder_recovery_at: Option<i64>,
+    /// Current owner. Set at creation to the seller; mutated by
+    /// `transfer_lock_ownership` signed by the previous holder.
+    pub current_holder: Pubkey,
+    /// State machine status per V0.3 Decision 6.
+    pub status: LockedClaimStatus,
+    /// Set when status == Settled. None otherwise.
+    pub settled_at: Option<i64>,
+    /// Set when status == Abandoned. None otherwise.
+    pub recovered_at: Option<i64>,
+}
+
+/// Claim state per V0.3 Decision 6 state machine.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
+pub enum LockedClaimStatus {
+    Pending,
+    Settled,
+    Abandoned,
+}
+
+/// LockedClaim PDA seed prefix. Per-claim PDA derived as
+/// `[LOCKED_CLAIM_SEED, vault_pda, voucher_hash]` so each unique voucher
+/// crystallizes to a unique account address.
+pub const LOCKED_CLAIM_SEED: &[u8] = b"locked-claim";
+
+/// LockedClaim layout version.
+pub const LOCKED_CLAIM_VERSION_V1: u8 = 1;
+
 #[error_code]
 pub enum VaultError {
     #[msg("Cooling-off period has not elapsed")]
@@ -136,4 +195,14 @@ pub enum VaultError {
     RevolvingCapacityExceeded,
     #[msg("max_revolving_capacity must be greater than zero")]
     RevolvingCapacityZero,
+    #[msg("Voucher's cumulative_amount does not advance the XOR frontier (already covered by spent or crystallized_cumulative)")]
+    LockRangeAlreadyClaimed,
+    #[msg("Locking this voucher would push outstanding_locked_amount above vault USDC balance")]
+    LockWouldOvercommitVault,
+    #[msg("Finalizing this withdrawal would bring vault balance below outstanding_locked_amount")]
+    WithdrawalWouldViolateReservation,
+    #[msg("Registering this session would push max_amount + outstanding_locked_amount above vault USDC balance")]
+    SessionWouldOvercommitVault,
+    #[msg("holder_recovery_at must be strictly greater than maturity_at when both are set")]
+    RecoveryBeforeMaturity,
 }
