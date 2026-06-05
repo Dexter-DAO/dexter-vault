@@ -15,6 +15,7 @@ pub mod migrate_v2_to_v3;
 pub mod migrate_v3_to_v4;
 pub mod lock_voucher;
 pub mod transfer_lock_ownership;
+pub mod settle_locked_voucher;
 pub mod recover_abandoned_lock;
 
 // Glob re-exports are required by Anchor: the `#[program]` macro resolves the
@@ -59,5 +60,7 @@ pub use migrate_v3_to_v4::*;
 pub use lock_voucher::*;
 #[allow(ambiguous_glob_reexports)]
 pub use transfer_lock_ownership::*;
+#[allow(ambiguous_glob_reexports)]
+pub use settle_locked_voucher::*;
 #[allow(ambiguous_glob_reexports)]
 pub use recover_abandoned_lock::*;

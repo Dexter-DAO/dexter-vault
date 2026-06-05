@@ -124,6 +124,13 @@ pub mod dexter_vault {
         instructions::transfer_lock_ownership::handler(ctx, args)
     }
 
+    pub fn settle_locked_voucher(
+        ctx: Context<SettleLockedVoucher>,
+        args: SettleLockedVoucherArgs,
+    ) -> Result<()> {
+        instructions::settle_locked_voucher::handler(ctx, args)
+    }
+
     pub fn recover_abandoned_lock(
         ctx: Context<RecoverAbandonedLock>,
         args: RecoverAbandonedLockArgs,
