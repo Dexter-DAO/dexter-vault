@@ -12,6 +12,12 @@ pub const VAULT_VERSION_V2: u8 = 2;
 /// (enlarged) session. See docs/superpowers/plans/2026-06-02-revolving-capacity-meter.md.
 pub const VAULT_VERSION_V3: u8 = 3;
 
+/// V4 appends LockedClaim accounting: three u64s to `Vault`
+/// (`outstanding_locked_amount`, `total_crystallized_amount`, `total_settled_amount`)
+/// and `crystallized_cumulative: u64` + `last_locked_sequence: u32` to
+/// `SessionRegistration`. Enlarges `Vault::INIT_SPACE`. New vaults init as V4.
+pub const VAULT_VERSION_V4: u8 = 4;
+
 #[account]
 #[derive(InitSpace)]
 pub struct Vault {
@@ -42,6 +48,16 @@ pub struct Vault {
     /// at most one active session per vault; multi-seller / multi-session is
     /// future work (issue #5).
     pub active_session: Option<SessionRegistration>,
+    /// Sum of unsettled LockedClaim amounts for this vault. Rises at
+    /// `lock_voucher`, falls at `settle_locked_voucher` / `recover_abandoned_lock`.
+    /// The crystallized (buyer-irrevocable) reservation tier. Read by
+    /// `finalize_withdrawal` to reject withdrawals that would violate the
+    /// reservation. (Seam spec section 1.)
+    pub outstanding_locked_amount: u64,
+    /// Lifetime monotonic locked-into-claim odometer at vault scope. Never decremented.
+    pub total_crystallized_amount: u64,
+    /// Lifetime monotonic settled-from-claim odometer at vault scope. Never decremented.
+    pub total_settled_amount: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, InitSpace)]
@@ -78,6 +94,14 @@ pub struct SessionRegistration {
     /// Admission cap the revolving meter is checked against. Set + passkey-
     /// endorsed at register_session_key. May be <= max_amount.
     pub max_revolving_capacity: u64,
+    /// Session-scope monotonic locked-into-claim odometer; mirror of `spent`
+    /// for the lock terminal path. Rises at `lock_voucher`. Never decremented.
+    /// The XOR frontier `max(spent, crystallized_cumulative)` gates both
+    /// terminal paths (seam spec section 4). (Seam spec section 1.)
+    pub crystallized_cumulative: u64,
+    /// Last voucher sequence number that was locked. Reserved for future
+    /// out-of-order lock detection — NOT the XOR guard (the frontier is).
+    pub last_locked_sequence: u32,
 }
 
 #[error_code]

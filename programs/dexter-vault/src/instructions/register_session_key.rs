@@ -110,6 +110,8 @@ pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -
         spent: 0,
         current_outstanding: 0,
         max_revolving_capacity: args.max_revolving_capacity,
+        crystallized_cumulative: 0,
+        last_locked_sequence: 0,
     });
 
     Ok(())
