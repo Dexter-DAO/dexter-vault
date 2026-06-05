@@ -13,6 +13,7 @@ pub mod settle_tab_voucher;
 pub mod set_swig_atomic;
 pub mod migrate_v2_to_v3;
 pub mod migrate_v3_to_v4;
+pub mod lock_voucher;
 
 // Glob re-exports are required by Anchor: the `#[program]` macro resolves the
 // `#[derive(Accounts)]`-generated helper modules (`__client_accounts_*`,
@@ -52,3 +53,5 @@ pub use set_swig_atomic::*;
 pub use migrate_v2_to_v3::*;
 #[allow(ambiguous_glob_reexports)]
 pub use migrate_v3_to_v4::*;
+#[allow(ambiguous_glob_reexports)]
+pub use lock_voucher::*;

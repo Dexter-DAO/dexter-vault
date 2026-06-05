@@ -109,4 +109,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::migrate_v3_to_v4::handler(ctx, args)
     }
+
+    pub fn lock_voucher(
+        ctx: Context<LockVoucher>,
+        args: LockVoucherArgs,
+    ) -> Result<()> {
+        instructions::lock_voucher::handler(ctx, args)
+    }
 }
