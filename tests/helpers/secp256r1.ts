@@ -199,6 +199,23 @@ export function forceReleaseMessage(swigAddress: PublicKey): Uint8Array {
   return buf;
 }
 
+/**
+ * recover_abandoned_lock op-message. MUST match the Rust handler byte-for-byte:
+ * tag || vault_pda (32) || claim_pda (32). Binding to BOTH vault AND claim
+ * prevents replay across vaults AND across claims within the same vault.
+ */
+export function recoverAbandonedLockMessage(
+  vaultPda: PublicKey,
+  claimPda: PublicKey
+): Uint8Array {
+  const tag = new TextEncoder().encode("recover_abandoned_lock");
+  const buf = new Uint8Array(tag.length + 32 + 32);
+  buf.set(tag, 0);
+  buf.set(vaultPda.toBytes(), tag.length);
+  buf.set(claimPda.toBytes(), tag.length + 32);
+  return buf;
+}
+
 export function rotatePasskeyMessage(newPasskeyPubkey: Uint8Array): Uint8Array {
   const tag = new TextEncoder().encode("rotate_passkey");
   const buf = new Uint8Array(tag.length + 33);
