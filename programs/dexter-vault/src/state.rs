@@ -65,6 +65,13 @@ pub struct SessionRegistration {
     pub allowed_counterparty: Pubkey,
     pub nonce: u32,
     pub spent: u64,
+    /// Live unsettled exposure. Rises at tab-open (settle_voucher increment),
+    /// falls at confirmed settle (settle_tab_voucher). This is the field that
+    /// REVOLVES — the credex meter.
+    pub current_outstanding: u64,
+    /// Admission cap the revolving meter is checked against. Set + passkey-
+    /// endorsed at register_session_key. May be <= max_amount.
+    pub max_revolving_capacity: u64,
 }
 
 #[error_code]
@@ -95,4 +102,8 @@ pub enum VaultError {
     NoActiveSession,
     #[msg("Revocation message session pubkey does not match the active session")]
     SessionPubkeyMismatch,
+    #[msg("Opening this tab would exceed the session's revolving capacity")]
+    RevolvingCapacityExceeded,
+    #[msg("max_revolving_capacity must be greater than zero")]
+    RevolvingCapacityZero,
 }

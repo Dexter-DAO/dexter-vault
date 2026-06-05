@@ -105,6 +105,8 @@ pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -
         allowed_counterparty: args.allowed_counterparty,
         nonce: args.nonce,
         spent: 0,
+        current_outstanding: 0,
+        max_revolving_capacity: 0,
     });
 
     Ok(())
