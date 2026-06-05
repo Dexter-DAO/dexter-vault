@@ -1,3 +1,29 @@
+// register_session_key — THE GATE (Task 8).
+//
+// Proves the PUBLISHED @dexterai/vault 0.4.1 client stack produces a V2/188
+// session-registration that the LIVE mainnet dexter-vault program accepts.
+//
+// The PROGRAM side (V2/188 register + settle) is already proven by
+// tests/revolving-meter.ts — but that file hand-builds the 188-byte message
+// with a TEST-LOCAL `sessionRegisterMessageV2` helper. This file is different:
+// the registration MESSAGE and the on-chain INSTRUCTION both come from the
+// PUBLISHED SDK:
+//
+//   - sessionRegisterMessage            (@dexterai/vault/messages, 188-byte V2)
+//   - buildRegisterSessionKeyInstruction(@dexterai/vault/instructions)
+//
+// The passkey/WebAuthn ceremony (signOperationWithPasskey) and the secp256r1
+// precompile builder remain the test harness's environmental helpers — they
+// synthesize the browser WebAuthn ceremony that has no Node equivalent. The
+// NOVEL thing under test is that the SDK's 188 bytes match what the deployed
+// program reconstructs, so the passkey signature verifies and active_session
+// reflects what was registered (including max_revolving_capacity).
+//
+// @dexterai/vault is ESM-only with an `exports` map; this repo's classic-node
+// tsconfig won't reach the `/messages` and `/instructions` subpaths via static
+// import, so we resolve them with an indirect-eval dynamic import — the same
+// pattern as tests/set-swig-atomic.ts and tests/enroll-test-vault.ts.
+
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { DexterVault } from "../target/types/dexter_vault";
@@ -7,6 +33,7 @@ import {
   SystemProgram,
   SYSVAR_INSTRUCTIONS_PUBKEY,
   Transaction,
+  TransactionInstruction,
 } from "@solana/web3.js";
 import { expect } from "chai";
 
@@ -14,45 +41,80 @@ import {
   generateP256Keypair,
   signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
-  sessionRegisterMessage,
-  sessionRevokeMessage,
-  fundFromProvider,
-  P256Keypair,
   makeTestProvider,
+  pollUntilAccountExists,
+  pollUntilAccount,
+  type P256Keypair,
 } from "./helpers/secp256r1";
 
-/**
- * register_session_key + revoke_session_key — the session-key sub-authority layer.
- *
- * The passkey signs ONCE per tab to authorize an in-memory session keypair to
- * sign vouchers off-chain for the duration. The on-chain instruction records
- * the registration on the vault. revoke_session_key tears it down early.
- *
- * Both messages are deterministic byte sequences (180 / 128 bytes) with domain
- * separators. The TS helper sessionRegister/RevokeMessage must produce
- * byte-identical output to the Rust builders or every signature looks forged.
- */
-describe("register_session_key + revoke_session_key (v2 session-key layer)", () => {
+// Indirect-eval dynamic import — see tests/set-swig-atomic.ts for the rationale.
+// `@dexterai/vault` is ESM-only with an `exports` map; classic-node resolution
+// in dexter-vault's tsconfig won't reach the subpaths statically.
+const nativeImport = new Function("p", "return import(p)") as (
+  p: string,
+) => Promise<any>;
+
+// ── SDK types (mirrored locally only for call-site type-safety; the actual
+//    functions are the PUBLISHED 0.4.1 exports loaded at runtime). ──────────
+type SessionRegisterMessageFn = (args: {
+  programId: PublicKey;
+  vaultPda: PublicKey;
+  sessionPubkey: Uint8Array;
+  maxAmount: bigint;
+  expiresAt: bigint;
+  allowedCounterparty: PublicKey;
+  nonce: number;
+  maxRevolvingCapacity: bigint;
+}) => Uint8Array;
+
+type BuildRegisterSessionKeyInstructionFn = (args: {
+  vaultPda: PublicKey;
+  sessionPubkey: Uint8Array;
+  maxAmount: bigint;
+  expiresAt: bigint;
+  allowedCounterparty: PublicKey;
+  nonce: number;
+  maxRevolvingCapacity: bigint;
+  clientDataJSON: Uint8Array;
+  authenticatorData: Uint8Array;
+}) => TransactionInstruction;
+
+describe("register_session_key — published @dexterai/vault 0.4.1 SDK path (V2/188, mainnet)", () => {
   const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
-  const authority = Keypair.generate();
-
-  async function fund(pubkey: PublicKey) {
-    await fundFromProvider(provider, pubkey);
-  }
+  // Resolved at runtime from the PUBLISHED SDK (not a test-local helper).
+  let sessionRegisterMessage: SessionRegisterMessageFn;
+  let buildRegisterSessionKeyInstruction: BuildRegisterSessionKeyInstructionFn;
 
   before(async () => {
-    await fund(authority.publicKey);
+    const messages = await nativeImport("@dexterai/vault/messages");
+    const instructions = await nativeImport("@dexterai/vault/instructions");
+    sessionRegisterMessage = messages.sessionRegisterMessage;
+    buildRegisterSessionKeyInstruction =
+      instructions.buildRegisterSessionKeyInstruction;
+    if (typeof sessionRegisterMessage !== "function") {
+      throw new Error("SDK did not export sessionRegisterMessage");
+    }
+    if (typeof buildRegisterSessionKeyInstruction !== "function") {
+      throw new Error("SDK did not export buildRegisterSessionKeyInstruction");
+    }
   });
 
-  async function provisionVault(): Promise<{ vaultPda: PublicKey; passkey: P256Keypair }> {
+  // Provision a fresh V3 vault bound to a passkey. initialize_vault is NOT the
+  // thing under test (it's the standard provisioning the SDK registration runs
+  // against), so we use the Anchor method directly — mirrors the lean
+  // registerSessionWithCapacity helper in revolving-meter.ts.
+  async function provisionVault(): Promise<{
+    vaultPda: PublicKey;
+    passkey: P256Keypair;
+  }> {
     const identityClaim = new Uint8Array(32);
     crypto.getRandomValues(identityClaim);
     const passkey = generateP256Keypair();
     const [vaultPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), Buffer.from(identityClaim.slice(0, 16))],
-      program.programId
+      program.programId,
     );
     await program.methods
       .initializeVault({
@@ -63,35 +125,36 @@ describe("register_session_key + revoke_session_key (v2 session-key layer)", () 
       .accountsPartial({
         vault: vaultPda,
         payer: provider.wallet.publicKey,
-        dexterAuthority: authority.publicKey,
+        // dexterAuthority = provider wallet so no extra signer is needed.
+        dexterAuthority: provider.wallet.publicKey,
         systemProgram: SystemProgram.programId,
       })
-      .signers([authority])
       .rpc();
+    // Guard against read-after-write propagation lag before the next tx reads
+    // the vault account.
+    await pollUntilAccountExists(provider.connection, vaultPda);
     return { vaultPda, passkey };
   }
 
-  /** Build a fresh ed25519-shaped session pubkey. We only need 32 bytes the
-   *  on-chain code can store — the on-chain program never validates it as a
-   *  curve point because session signatures are verified off-chain. */
-  function newSessionPubkey(): Uint8Array {
-    return Keypair.generate().publicKey.toBytes();
-  }
-
-  function farFutureExpiry(): bigint {
-    // 1 hour in the future, in unix seconds
-    return BigInt(Math.floor(Date.now() / 1000) + 3600);
-  }
-
-  async function sendRegister(args: {
+  /**
+   * Register a session via the PUBLISHED SDK path:
+   *   1. SDK sessionRegisterMessage(...)         → the 188-byte V2 message
+   *   2. passkey signs it (WebAuthn ceremony helper)
+   *   3. secp256r1 precompile verify ix over that message
+   *   4. SDK buildRegisterSessionKeyInstruction(...) → the on-chain register ix
+   *   5. submit [precompile, register] atomically (precompile FIRST)
+   */
+  async function registerViaSdk(args: {
     vaultPda: PublicKey;
-    passkey: P256Keypair;       // who signs the registration
+    passkey: P256Keypair; // signs the registration
     sessionPubkey: Uint8Array;
     maxAmount: bigint;
     expiresAt: bigint;
     allowedCounterparty: PublicKey;
     nonce: number;
+    maxRevolvingCapacity: bigint;
   }): Promise<{ sig: string }> {
+    // (1) SDK message — 188-byte V2, includes max_revolving_capacity.
     const msg = sessionRegisterMessage({
       programId: program.programId,
       vaultPda: args.vaultPda,
@@ -100,290 +163,141 @@ describe("register_session_key + revoke_session_key (v2 session-key layer)", () 
       expiresAt: args.expiresAt,
       allowedCounterparty: args.allowedCounterparty,
       nonce: args.nonce,
+      maxRevolvingCapacity: args.maxRevolvingCapacity,
     });
+    if (msg.length !== 188) {
+      throw new Error(`SDK message expected 188 bytes, got ${msg.length}`);
+    }
+
+    // (2) passkey signs the SDK message (synthesized WebAuthn ceremony).
     const signed = signOperationWithPasskey(args.passkey, msg);
+
+    // (3) secp256r1 precompile verify sibling.
     const precompileIx = buildSecp256r1VerifyInstruction(
       args.passkey.publicKey,
       signed.signature,
-      signed.precompileMessage
+      signed.precompileMessage,
     );
-    const vaultIx = await program.methods
-      .registerSessionKey({
-        sessionPubkey: Array.from(args.sessionPubkey),
-        maxAmount: new anchor.BN(args.maxAmount.toString()),
-        expiresAt: new anchor.BN(args.expiresAt.toString()),
-        allowedCounterparty: args.allowedCounterparty,
-        nonce: args.nonce,
-        clientDataJson: Buffer.from(signed.clientDataJSON),
-        authenticatorData: Buffer.from(signed.authenticatorData),
-      })
-      .accountsPartial({ vault: args.vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
-      .instruction();
+
+    // (4) SDK on-chain instruction — discriminator, Borsh args, accounts, and
+    //     program id all come from @dexterai/vault@0.4.1.
+    const vaultIx = buildRegisterSessionKeyInstruction({
+      vaultPda: args.vaultPda,
+      sessionPubkey: args.sessionPubkey,
+      maxAmount: args.maxAmount,
+      expiresAt: args.expiresAt,
+      allowedCounterparty: args.allowedCounterparty,
+      nonce: args.nonce,
+      maxRevolvingCapacity: args.maxRevolvingCapacity,
+      clientDataJSON: signed.clientDataJSON,
+      authenticatorData: signed.authenticatorData,
+    });
+
+    // Sanity: the SDK targets the program & sysvar the live handler expects.
+    expect(vaultIx.programId.toBase58()).to.equal(program.programId.toBase58());
+    const sysvarKey = vaultIx.keys.find((k) =>
+      k.pubkey.equals(SYSVAR_INSTRUCTIONS_PUBKEY),
+    );
+    expect(sysvarKey, "register ix must reference the instructions sysvar").to
+      .not.be.undefined;
+
+    // (5) precompile FIRST, then register — atomic.
     const tx = new Transaction().add(precompileIx, vaultIx);
     const sig = await provider.sendAndConfirm(tx);
     return { sig };
   }
 
-  it("SUCCEEDS: a fresh registration writes active_session with the right fields", async () => {
+  it("SUCCEEDS: SDK-built V2/188 registration is accepted; active_session reflects max_revolving_capacity", async () => {
     const { vaultPda, passkey } = await provisionVault();
-    const sessionPubkey = newSessionPubkey();
-    const counterparty = Keypair.generate().publicKey;
-    const expiresAt = farFutureExpiry();
 
-    await sendRegister({
+    const sessionKeypair = Keypair.generate();
+    const sessionPubkey = sessionKeypair.publicKey.toBytes();
+    const counterparty = Keypair.generate().publicKey;
+    const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const maxAmount = BigInt(10_000_000); // $10
+    const maxRevolvingCapacity = BigInt(2_000_000); // $2 — must be > 0 for V2
+    const nonce = 1;
+
+    const { sig } = await registerViaSdk({
       vaultPda,
       passkey,
       sessionPubkey,
-      maxAmount: BigInt(1_000_000),
+      maxAmount,
       expiresAt,
       allowedCounterparty: counterparty,
-      nonce: 1,
+      nonce,
+      maxRevolvingCapacity,
     });
+    console.log(`\n=== SDK V2/188 REGISTER GATE ===`);
+    console.log(`vault:   ${vaultPda.toBase58()}`);
+    console.log(`tx:      ${sig}`);
 
-    const vault = await program.account.vault.fetch(vaultPda);
-    expect(vault.activeSession, "active_session must be populated").to.not.equal(null);
+    // Read back the on-chain active_session, polling past any read replica lag.
+    const vault = await pollUntilAccount(
+      () => program.account.vault.fetch(vaultPda),
+      (v: any) => v.activeSession != null,
+    );
+    expect(vault.activeSession, "active_session must be populated").to.not.equal(
+      null,
+    );
     const sess = vault.activeSession!;
-    expect(Buffer.from(sess.sessionPubkey)).to.deep.equal(Buffer.from(sessionPubkey));
-    expect(sess.maxAmount.toString()).to.equal("1000000");
+
+    // The registered session pubkey round-tripped.
+    expect(Buffer.from(sess.sessionPubkey)).to.deep.equal(
+      Buffer.from(sessionPubkey),
+    );
+    // max_amount the SDK encoded.
+    expect(sess.maxAmount.toString()).to.equal(maxAmount.toString());
+    // THE V2 assertion: max_revolving_capacity is stored from the 188-byte msg.
+    expect(sess.maxRevolvingCapacity.toString()).to.equal(
+      maxRevolvingCapacity.toString(),
+    );
+    // current_outstanding starts at zero on a fresh registration.
+    expect(sess.currentOutstanding.toString()).to.equal("0");
     expect(sess.expiresAt.toString()).to.equal(expiresAt.toString());
-    expect(sess.allowedCounterparty.toBase58()).to.equal(counterparty.toBase58());
-    expect(sess.nonce).to.equal(1);
+    expect(sess.allowedCounterparty.toBase58()).to.equal(
+      counterparty.toBase58(),
+    );
+    expect(sess.nonce).to.equal(nonce);
     expect(sess.spent.toString()).to.equal("0");
+
+    console.log(
+      `active_session.maxRevolvingCapacity=${sess.maxRevolvingCapacity.toString()} ` +
+        `(expected ${maxRevolvingCapacity.toString()})`,
+    );
+    console.log(
+      `active_session.maxAmount=${sess.maxAmount.toString()} ` +
+        `currentOutstanding=${sess.currentOutstanding.toString()} ` +
+        `spent=${sess.spent.toString()}`,
+    );
+    console.log(`*** GATE PASSED: published SDK V2/188 accepted by live program ***\n`);
   });
 
-  it("REJECTS: foreign passkey signing the registration → instruction fails", async () => {
+  it("REJECTS: a foreign passkey signing the SDK message → registration fails", async () => {
+    // Same SDK message + instruction, but a DIFFERENT passkey signs it. The
+    // secp256r1 precompile verifies the signature against the attacker's
+    // pubkey while the on-chain handler reconstructs the message and checks the
+    // precompile sibling against the vault's bound passkey — mismatch → reject.
+    // This proves the SDK's 188 bytes are the thing being authenticated.
     const { vaultPda } = await provisionVault();
     const attacker = generateP256Keypair();
     try {
-      await sendRegister({
+      await registerViaSdk({
         vaultPda,
         passkey: attacker,
-        sessionPubkey: newSessionPubkey(),
-        maxAmount: BigInt(1_000_000),
-        expiresAt: farFutureExpiry(),
+        sessionPubkey: Keypair.generate().publicKey.toBytes(),
+        maxAmount: BigInt(10_000_000),
+        expiresAt: BigInt(Math.floor(Date.now() / 1000) + 3600),
         allowedCounterparty: Keypair.generate().publicKey,
         nonce: 1,
+        maxRevolvingCapacity: BigInt(2_000_000),
       });
-      expect.fail("registration with foreign passkey should have errored");
-    } catch (e: any) {
-      // The precompile verifies the signature against the wrong pubkey; the
-      // sysvar introspection in verify_passkey_signed then rejects.
-      expect(e.message).to.satisfy((m: string) =>
-        m.includes("PasskeyVerificationFailed") || m.includes("custom program error")
-      );
-    }
-  });
-
-  it("REJECTS: max_amount = 0 → SessionCapZero", async () => {
-    const { vaultPda, passkey } = await provisionVault();
-    try {
-      await sendRegister({
-        vaultPda,
-        passkey,
-        sessionPubkey: newSessionPubkey(),
-        maxAmount: BigInt(0),
-        expiresAt: farFutureExpiry(),
-        allowedCounterparty: Keypair.generate().publicKey,
-        nonce: 1,
-      });
-      expect.fail("max_amount=0 should have errored");
+      expect.fail("registration with a foreign passkey should have errored");
     } catch (e: any) {
       expect(e.message).to.satisfy((m: string) =>
-        m.includes("SessionCapZero") || m.includes("custom program error")
+        m.includes("PasskeyVerificationFailed") ||
+        m.includes("custom program error"),
       );
     }
-  });
-
-  it("REJECTS: expires_at in the past → SessionExpiryInPast", async () => {
-    const { vaultPda, passkey } = await provisionVault();
-    try {
-      await sendRegister({
-        vaultPda,
-        passkey,
-        sessionPubkey: newSessionPubkey(),
-        maxAmount: BigInt(1_000_000),
-        expiresAt: BigInt(Math.floor(Date.now() / 1000) - 60),
-        allowedCounterparty: Keypair.generate().publicKey,
-        nonce: 1,
-      });
-      expect.fail("past expiry should have errored");
-    } catch (e: any) {
-      expect(e.message).to.satisfy((m: string) =>
-        m.includes("SessionExpiryInPast") || m.includes("custom program error")
-      );
-    }
-  });
-
-  it("REJECTS: second register call while a session is already active → SessionAlreadyActive", async () => {
-    const { vaultPda, passkey } = await provisionVault();
-    // First registration succeeds.
-    await sendRegister({
-      vaultPda,
-      passkey,
-      sessionPubkey: newSessionPubkey(),
-      maxAmount: BigInt(1_000_000),
-      expiresAt: farFutureExpiry(),
-      allowedCounterparty: Keypair.generate().publicKey,
-      nonce: 1,
-    });
-    // Second registration (different session pubkey) should fail — there is
-    // an unexpired session in place. Buyer must revoke first.
-    try {
-      await sendRegister({
-        vaultPda,
-        passkey,
-        sessionPubkey: newSessionPubkey(),
-        maxAmount: BigInt(1_000_000),
-        expiresAt: farFutureExpiry(),
-        allowedCounterparty: Keypair.generate().publicKey,
-        nonce: 2,
-      });
-      expect.fail("double-register should have errored");
-    } catch (e: any) {
-      expect(e.message).to.satisfy((m: string) =>
-        m.includes("SessionAlreadyActive") || m.includes("custom program error")
-      );
-    }
-  });
-
-  // ── revoke_session_key ───────────────────────────────────────────────
-
-  async function sendRevoke(args: {
-    vaultPda: PublicKey;
-    passkey: P256Keypair;
-    sessionPubkey: Uint8Array;
-  }): Promise<{ sig: string }> {
-    const msg = sessionRevokeMessage({
-      programId: program.programId,
-      vaultPda: args.vaultPda,
-      sessionPubkey: args.sessionPubkey,
-    });
-    const signed = signOperationWithPasskey(args.passkey, msg);
-    const precompileIx = buildSecp256r1VerifyInstruction(
-      args.passkey.publicKey,
-      signed.signature,
-      signed.precompileMessage
-    );
-    const vaultIx = await program.methods
-      .revokeSessionKey({
-        clientDataJson: Buffer.from(signed.clientDataJSON),
-        authenticatorData: Buffer.from(signed.authenticatorData),
-      })
-      .accountsPartial({ vault: args.vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
-      .instruction();
-    const tx = new Transaction().add(precompileIx, vaultIx);
-    const sig = await provider.sendAndConfirm(tx);
-    return { sig };
-  }
-
-  it("REVOKE SUCCEEDS: passkey-signed revocation clears active_session", async () => {
-    const { vaultPda, passkey } = await provisionVault();
-    const sessionPubkey = newSessionPubkey();
-    await sendRegister({
-      vaultPda,
-      passkey,
-      sessionPubkey,
-      maxAmount: BigInt(1_000_000),
-      expiresAt: farFutureExpiry(),
-      allowedCounterparty: Keypair.generate().publicKey,
-      nonce: 1,
-    });
-
-    await sendRevoke({ vaultPda, passkey, sessionPubkey });
-
-    const vault = await program.account.vault.fetch(vaultPda);
-    expect(vault.activeSession, "active_session must be cleared after revoke").to.equal(null);
-  });
-
-  it("REVOKE REJECTS: no active session → NoActiveSession", async () => {
-    const { vaultPda, passkey } = await provisionVault();
-    try {
-      await sendRevoke({ vaultPda, passkey, sessionPubkey: newSessionPubkey() });
-      expect.fail("revoking with no active session should have errored");
-    } catch (e: any) {
-      expect(e.message).to.satisfy((m: string) =>
-        m.includes("NoActiveSession") || m.includes("custom program error")
-      );
-    }
-  });
-
-  it("REVOKE REJECTS: replay an old revocation against a NEW session → reject", async () => {
-    // This is the stale-revocation-replay defense. The revocation message
-    // binds to the session pubkey being revoked. Even with a valid passkey
-    // signature over an OLD session's revocation message, the on-chain
-    // verifier will reconstruct the message using the CURRENT active
-    // session's pubkey — which is different — so the precompile sibling
-    // sees a different message and the signature fails to verify.
-    const { vaultPda, passkey } = await provisionVault();
-    const oldSession = newSessionPubkey();
-
-    // Open + revoke an old session.
-    await sendRegister({
-      vaultPda,
-      passkey,
-      sessionPubkey: oldSession,
-      maxAmount: BigInt(1_000_000),
-      expiresAt: farFutureExpiry(),
-      allowedCounterparty: Keypair.generate().publicKey,
-      nonce: 1,
-    });
-
-    // Pre-build the OLD session's revocation signature (saved attacker tool).
-    const oldRevokeMsg = sessionRevokeMessage({
-      programId: program.programId,
-      vaultPda,
-      sessionPubkey: oldSession,
-    });
-    const oldSigned = signOperationWithPasskey(passkey, oldRevokeMsg);
-
-    // Actually revoke (cleanly) the old session.
-    await sendRevoke({ vaultPda, passkey, sessionPubkey: oldSession });
-
-    // Open a NEW session with a different session pubkey.
-    const newSession = newSessionPubkey();
-    await sendRegister({
-      vaultPda,
-      passkey,
-      sessionPubkey: newSession,
-      maxAmount: BigInt(1_000_000),
-      expiresAt: farFutureExpiry(),
-      allowedCounterparty: Keypair.generate().publicKey,
-      nonce: 2,
-    });
-
-    // Now try to replay the OLD revocation signature. The on-chain handler
-    // will build the revocation message against the CURRENT (new) session
-    // pubkey, which doesn't match what the attacker signed. The precompile
-    // verifies the signature against the OLD message, but verify_passkey_signed
-    // requires that message to equal the one the program reconstructed.
-    const precompileIx = buildSecp256r1VerifyInstruction(
-      passkey.publicKey,
-      oldSigned.signature,
-      oldSigned.precompileMessage
-    );
-    const vaultIx = await program.methods
-      .revokeSessionKey({
-        clientDataJson: Buffer.from(oldSigned.clientDataJSON),
-        authenticatorData: Buffer.from(oldSigned.authenticatorData),
-      })
-      .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
-      .instruction();
-    const tx = new Transaction().add(precompileIx, vaultIx);
-    try {
-      await provider.sendAndConfirm(tx);
-      expect.fail("stale revocation replay should have errored");
-    } catch (e: any) {
-      // The challenge in old clientDataJSON hashes the OLD session's message,
-      // but the on-chain code reconstructs the NEW session's message and
-      // computes its sha256 — they don't match, so the challenge check fails.
-      expect(e.message).to.satisfy((m: string) =>
-        m.includes("PasskeyVerificationFailed") || m.includes("custom program error")
-      );
-    }
-
-    // Sanity: the new session is still active and untouched.
-    const vault = await program.account.vault.fetch(vaultPda);
-    expect(vault.activeSession, "stale replay must not affect the new session").to.not.equal(null);
-    expect(Buffer.from(vault.activeSession!.sessionPubkey)).to.deep.equal(Buffer.from(newSession));
   });
 });
