@@ -205,3 +205,88 @@ emailed to Branch). NOT in dexter-vault. Don't confuse the two doc homes.
 Withdrawal paths use typed `Account<Vault>` → Anchor deserializes the WHOLE struct on entry → any
 future struct-size change FREEZES mid-session vaults until migrated. RULE: migrate-before-deploy,
 OR make load paths size-tolerant. The shared-session-master means production is always migratable.
+
+---
+
+# ===== NEXT SESSION STARTS HERE: THREAD B (the gate) =====
+
+## The two-agent state (2026-06-05, synced)
+Two Claude sessions collaborated and ALIGNED. The other agent (the dexter-facilitator session)
+owns **Phase 1 / LockedClaim** (vault-level reservation: `lock_voucher`, `transfer_lock_ownership`,
+`settle_locked_voucher`, `recover_abandoned_lock` + `vault.outstanding_locked_amount` accumulator).
+Spec = `dexter-thesis/V0.3-IMPLEMENTATION-RISK-DECISIONS.md`. Full synthesis (READ THIS) =
+`dexter-thesis/SYNTHESIS-2026-06-05-credex-meets-lockedclaim.md`. The other agent is ON HOLD per
+Branch — do NOT solicit him; this session leads. The two accumulators are the same pattern at two
+altitudes: my `session.current_outstanding` (revocable tier) graduates to his
+`vault.outstanding_locked_amount` (crystallized tier) at lock time.
+
+## SEQUENCING (decided): Thread B GATES Phase 1.
+Tab-open through the live SDK is BROKEN today (program=V2/188, SDK=V1/180). Phase 1 needs a working
+tab to produce a lockable voucher → so B must land first. Phase 1 Rust can be WRITTEN in parallel
+(build-only) but its e2e-test + deploy wait for B green. **This session: DO THREAD B.**
+
+## THREAD B — exact work order (start here, execute surgically)
+
+**Goal:** bring the client stack from V1/180-byte to V2/188-byte registration so tab-open works
+against the deployed mainnet program. Then verify a real tab open→settle on mainnet.
+
+**The byte-layout change** (V1→V2), authoritative source = dexter-vault register_session_key.rs:118-131:
+```
+[  0..32) domain "OTS_SESSION_REGISTER_V2\0...\0"   (was V1; 23 chars + 9 NUL = 32)
+[ 32..64) program ID
+[ 64..96) vault PDA
+[ 96..128) session_pubkey
+[128..136) max_amount u64 LE
+[136..144) expires_at i64 LE
+[144..176) allowed_counterparty
+[176..180) nonce u32 LE
+[180..188) max_revolving_capacity u64 LE   <-- NEW (the only addition)
+```
+Also: `register_session_key` now takes a NEW arg `max_revolving_capacity: u64` (must be > 0, else
+`RevolvingCapacityZero`). Callers must pass it.
+
+**Files to update (SDK = dexter-x402-sdk/src/tab/):**
+1. `messages.ts` — builds the registration message. Change 180→188, append max_revolving_capacity
+   u64 LE, domain V1→V2. (THE core change.)
+2. `seller/verify.ts` — HARD-rejects `length !== 180` and checks domain `OTS_SESSION_REGISTER_V1`.
+   Change to 188 + V2 + parse the new field into the scope.
+3. `adapters/solana/index.ts`, `sessions.ts`, `passkey-noble.ts`, `index.ts` — all reference the
+   180-byte layout / build the register call. Update to 188 + pass maxRevolvingCapacity through the
+   register-session call.
+**Facilitator (dexter-facilitator/src/):** `tabSettle.ts`, `mppSession.ts` — wherever they build the
+registration message / register args, same V2/188 + maxRevolvingCapacity update.
+**@dexterai/vault SDK byte-parity tests (dexter-vault-sdk/):** `src/messages/session.ts` +
+`tests/byte-parity.test.ts` (+ `src/constants/index.ts` for the domain) — update to 188-byte V2 so
+parity passes against the deployed program. The other agent flagged: these byte-parity tests are
+the right place to catch the drift.
+**dexter-vault tests/register-session-key.ts:** still builds V1/180 (pre-existing tsc error noted in
+this session). Migrate its ceremony to V2/188 too (it's currently broken).
+
+**Verify B is green:** a real tab open→settle on mainnet through the updated SDK. THAT is the gate
+for Phase 1 e2e.
+
+**Discipline reminders for any subagents:** HARD no-deploy fence in caps (the Task-2 incident).
+Build-only = compile/type-check, NO mainnet deploy without Branch's explicit per-step go. Don't
+touch Branch's uncommitted docs. Tests run on MAINNET (secp256r1 precompile is mainnet-only; no
+local validator — settled). Node fetch needs sandbox disabled (curl works under sandbox; fetch
+doesn't) → use dangerouslyDisableSandbox on mainnet RPC calls.
+
+## AFTER THREAD B: Phase 1 prep notes (for when we get there)
+- Phase 1 task #1 = `migrate_v3_to_v4` (the other agent ACCEPTED this — he'd missed it). His
+  Decision-1 adds THREE u64s to Vault (`outstanding_locked_amount`, `total_crystallized_amount`,
+  `total_settled_amount`) → enlarges account again → needs V4 + migration. TEMPLATE = my
+  `migrate_v2_to_v3` (this repo, commit 7284985): AccountInfo not typed, resize +24, zero-fill
+  trailing, manual-prefix-decode authority gate, rent top-up. His `finalize_withdrawal` reservation
+  check reads the new u64s from typed `Account<Vault>` → every vault must be V4-migrated first.
+- Named test invariant he accepted: a voucher amount flows down EXACTLY ONE terminal path —
+  lock_voucher XOR tab-settle, never both. `crystallized_cumulative` (new field) is DISTINCT from
+  my `spent`. spent = tab-close settles; crystallized = locks.
+- Tighten the turnover-demo assertion `>1` → `>= ROUNDS*CLAIM/REVOLVING` (one-liner, my TODO).
+
+## QUICK ORIENTATION FOR NEXT SESSION
+- Credex meter: DONE, mainnet, 5x proven. 9 commits c2e661b..163bbbc, UNPUSHED (Branch's call to push).
+- Strategy thesis (Endow-EVM/Solana clearing advantage): dexter-decks/thesis/2026-06-02-endow-evm-*.md
+- This session id: e0a2c1c7-7ff1-4886-8a50-cbdb68d0883b
+- Wallet: ~/.config/solana/dexter-vault/upgrade-authority.json (~2.4 SOL). Env for tests:
+  ANCHOR_WALLET=that, ANCHOR_PROVIDER_URL=https://api.mainnet-beta.solana.com,
+  PATH+=~/.local/share/solana/install/active_release/bin.
