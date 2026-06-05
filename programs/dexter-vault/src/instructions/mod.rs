@@ -12,6 +12,7 @@ pub mod revoke_session_key;
 pub mod settle_tab_voucher;
 pub mod set_swig_atomic;
 pub mod migrate_v2_to_v3;
+pub mod migrate_v3_to_v4;
 
 // Glob re-exports are required by Anchor: the `#[program]` macro resolves the
 // `#[derive(Accounts)]`-generated helper modules (`__client_accounts_*`,
