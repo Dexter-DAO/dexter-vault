@@ -166,10 +166,111 @@ interface MeterVaultContext {
 }
 
 /**
- * Provision a fresh vault whose dexterAuthority is the provider wallet, register
- * a session that endorses both maxAmount and maxRevolvingCapacity via the V2
- * 188-byte passkey ceremony, AND stand up the real Swig + funded ATAs the Tab
- * settle path needs.
+ * The lean context the registration + open-capture tests need: a vault
+ * provisioned (V3) + a session registered via the V2 188-byte passkey
+ * ceremony. No Swig, no mint, no ATAs. `open()` only needs `vaultPda` and the
+ * provider's dexterAuthority signer, so this is sufficient for everything that
+ * does NOT call `settle`.
+ */
+interface LeanVaultContext {
+  vaultPda: PublicKey;
+  /** Retained for parity with the heavy context + any future signed-voucher
+   *  test that wants to drive settle_voucher with a real session key. */
+  sessionKeypair: Keypair;
+  /** Stable per-vault channel id (parity with the heavy context). */
+  channelId: Uint8Array;
+}
+
+/**
+ * LEAN: provision a fresh vault whose dexterAuthority is the provider wallet and
+ * register a session that endorses both maxAmount and maxRevolvingCapacity via
+ * the V2 188-byte passkey ceremony. NOTHING ELSE — no Swig, no mint, no ATAs.
+ *
+ * This is what the registration + open-capture tests use: they only assert on
+ * vault state (the stored cap, current_outstanding) and `open()` (settle_voucher
+ * increment) which moves no tokens. Callers destructure `{ vaultPda }` or read
+ * `ctx.vaultPda`.
+ *
+ * For the heavy apparatus the Tab settle path needs (Swig + funded ATAs), use
+ * `registerSettleableVault`.
+ */
+async function registerSessionWithCapacity(
+  program: Program<DexterVault>,
+  provider: anchor.AnchorProvider,
+  opts: { maxAmount: number; maxRevolvingCapacity: number }
+): Promise<LeanVaultContext> {
+  const identityClaim = new Uint8Array(32);
+  crypto.getRandomValues(identityClaim);
+  const passkey: P256Keypair = generateP256Keypair();
+  const [vaultPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("vault"), Buffer.from(identityClaim.slice(0, 16))],
+    program.programId
+  );
+  await program.methods
+    .initializeVault({
+      passkeyPubkey: Array.from(passkey.publicKey),
+      coolingOffSeconds: 0,
+      identityClaim: Array.from(identityClaim),
+    })
+    .accountsPartial({
+      vault: vaultPda,
+      payer: provider.wallet.publicKey,
+      dexterAuthority: provider.wallet.publicKey,
+      systemProgram: SystemProgram.programId,
+    })
+    .rpc();
+
+  const sessionKeypair = Keypair.generate();
+  const sessionPubkey = sessionKeypair.publicKey.toBytes();
+  const allowedCounterparty = Keypair.generate().publicKey;
+  const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+  const nonce = 1;
+  const maxAmount = BigInt(opts.maxAmount);
+  const maxRevolvingCapacity = BigInt(opts.maxRevolvingCapacity);
+
+  const msg = sessionRegisterMessageV2({
+    programId: program.programId,
+    vaultPda,
+    sessionPubkey,
+    maxAmount,
+    expiresAt,
+    allowedCounterparty,
+    nonce,
+    maxRevolvingCapacity,
+  });
+  const signed = signOperationWithPasskey(passkey, msg);
+  const precompileIx = buildSecp256r1VerifyInstruction(
+    passkey.publicKey,
+    signed.signature,
+    signed.precompileMessage
+  );
+  const vaultIx = await program.methods
+    .registerSessionKey({
+      sessionPubkey: Array.from(sessionPubkey),
+      maxAmount: new anchor.BN(maxAmount.toString()),
+      expiresAt: new anchor.BN(expiresAt.toString()),
+      allowedCounterparty,
+      nonce,
+      maxRevolvingCapacity: new anchor.BN(maxRevolvingCapacity.toString()),
+      clientDataJson: Buffer.from(signed.clientDataJSON),
+      authenticatorData: Buffer.from(signed.authenticatorData),
+    })
+    .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
+    .instruction();
+  const tx = new Transaction().add(precompileIx, vaultIx);
+  await provider.sendAndConfirm(tx);
+
+  const channelId = new Uint8Array(32);
+  crypto.getRandomValues(channelId);
+
+  return { vaultPda, sessionKeypair, channelId };
+}
+
+/**
+ * HEAVY: provision a fresh vault whose dexterAuthority is the provider wallet,
+ * register a session that endorses both maxAmount and maxRevolvingCapacity via
+ * the V2 188-byte passkey ceremony, AND stand up the real Swig + funded ATAs the
+ * Tab settle path needs.
  *
  * The Swig provisioning mirrors swig-settle-flow.ts (createSwig role 0 +
  * addAuthority role 1) and enroll-test-vault.ts, except role 1's ProgramExec
@@ -177,10 +278,10 @@ interface MeterVaultContext {
  * the Swig's validator accepts settle_tab_voucher as the instruction preceding
  * the SignV2 transfer.
  *
- * Returns a MeterVaultContext. Existing callers that only `{ vaultPda }`-
- * destructure keep working unchanged.
+ * Returns a MeterVaultContext. This is what `settle` + the turnover demo need;
+ * the lighter registration / open-capture tests use registerSessionWithCapacity.
  */
-async function registerSessionWithCapacity(
+async function registerSettleableVault(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
   opts: { maxAmount: number; maxRevolvingCapacity: number }
@@ -583,7 +684,7 @@ describe("revolving-meter: settle releases exposure", () => {
   const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
   const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
   it("settle_tab_voucher frees current_outstanding by the settle delta", async () => {
-    const ctx = await registerSessionWithCapacity(program, provider, {
+    const ctx = await registerSettleableVault(program, provider, {
       maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
     });
     await open(program, provider, ctx.vaultPda, 1_000_000);
