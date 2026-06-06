@@ -158,4 +158,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::repay_credit::handler(ctx, args)
     }
+
+    pub fn seize_collateral(
+        ctx: Context<SeizeCollateral>,
+        args: SeizeCollateralArgs,
+    ) -> Result<()> {
+        instructions::seize_collateral::handler(ctx, args)
+    }
 }
