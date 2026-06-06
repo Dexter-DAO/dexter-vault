@@ -403,6 +403,8 @@ git commit -m "feat(vault-sdk): credit instruction builders (open_standby/draw/r
 
 Provision a user vault + a financier vault (both funded). `open_standby` (financier backs user up to $N). Drive a draw that takes the user negative (spend past their balance), assert `borrowed` rose, the seller received USDC from the FINANCIER's vault, `borrow_recovery_at` set. Repay, assert `borrowed` falls to 0 and `borrow_recovery_at` clears. Run on mainnet, prove green.
 
+**⚠️ CRITICAL TEST-SETUP (the second fund-safety leg lives here):** `draw_credit`'s SignV2 spends the FINANCIER's `swig_wallet` ATA, authorized by Swig's ProgramExec validator matching the `draw_credit` discriminator as a registered marker **on the FINANCIER's swig**. The test MUST register the `draw_credit` ProgramExec marker on the **financier's** swig enrollment, NOT the user's. If registered on the wrong swig, the draw either fails or (worse) the financier-swig safety leg is only enforced in theory. Likewise `repay_credit`/`seize_collateral` markers go on the swig whose wallet their SignV2 spends (user's for repay, user's for seize — both move USER collateral). Assert the seller's USDC balance rose by the drawn amount AND the financier's swig_wallet ATA fell by it (proves the money came from the financier, not the user). (Flagged by the Task-3 code-quality reviewer.)
+
 - [ ] **Step 2: Anti-rug #1 — draw past cap rejected**
 
 `open_standby` with cap $5, attempt a draw of $6 → expect `CreditWouldExceedStandbyCap`. (The financier's committed ceiling holds.)
