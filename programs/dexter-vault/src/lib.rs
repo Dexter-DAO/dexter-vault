@@ -144,4 +144,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::open_standby::handler(ctx, args)
     }
+
+    pub fn draw_credit(
+        ctx: Context<DrawCredit>,
+        args: DrawCreditArgs,
+    ) -> Result<()> {
+        instructions::draw_credit::handler(ctx, args)
+    }
 }

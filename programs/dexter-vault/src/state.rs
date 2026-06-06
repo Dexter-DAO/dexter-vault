@@ -223,6 +223,8 @@ pub enum VaultError {
     SessionWouldOvercommitVault,
     #[msg("holder_recovery_at must be strictly greater than maturity_at when both are set")]
     RecoveryBeforeMaturity,
+    #[msg("Standby cap must be greater than zero.")]
+    StandbyCapZero,
     #[msg("Draw would exceed the financier's committed standby cap.")]
     CreditWouldExceedStandbyCap,
     #[msg("Withdrawal would violate the credit pin (borrowed amount is reserved).")]

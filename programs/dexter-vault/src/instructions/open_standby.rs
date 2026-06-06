@@ -68,8 +68,10 @@ pub fn handler(ctx: Context<OpenStandby>, args: OpenStandbyArgs) -> Result<()> {
         VaultError::UnsupportedVaultVersion
     );
 
-    // A zero cap is a meaningless credit facility.
-    require!(args.cap > 0, VaultError::CreditWouldExceedStandbyCap);
+    // A zero cap is a meaningless credit facility. `StandbyCapZero` is the
+    // semantically correct error for a zero CONFIGURED cap; the draw-time
+    // ceiling check uses `CreditWouldExceedStandbyCap`.
+    require!(args.cap > 0, VaultError::StandbyCapZero);
 
     // Build the op-message the USER's passkey consented to. Bind it to the
     // user's vault + financier identity + cap so a signature cannot be replayed
