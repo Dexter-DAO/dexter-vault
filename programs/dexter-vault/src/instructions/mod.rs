@@ -19,6 +19,7 @@ pub mod settle_locked_voucher;
 pub mod recover_abandoned_lock;
 pub mod open_standby;
 pub mod draw_credit;
+pub mod repay_credit;
 
 // Glob re-exports are required by Anchor: the `#[program]` macro resolves the
 // `#[derive(Accounts)]`-generated helper modules (`__client_accounts_*`,
@@ -70,3 +71,5 @@ pub use recover_abandoned_lock::*;
 pub use open_standby::*;
 #[allow(ambiguous_glob_reexports)]
 pub use draw_credit::*;
+#[allow(ambiguous_glob_reexports)]
+pub use repay_credit::*;

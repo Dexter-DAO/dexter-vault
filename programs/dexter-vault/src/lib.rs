@@ -151,4 +151,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::draw_credit::handler(ctx, args)
     }
+
+    pub fn repay_credit(
+        ctx: Context<RepayCredit>,
+        args: RepayCreditArgs,
+    ) -> Result<()> {
+        instructions::repay_credit::handler(ctx, args)
+    }
 }
