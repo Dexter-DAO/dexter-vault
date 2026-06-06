@@ -536,21 +536,67 @@ describe("lock_voucher — over-cap rejection", () => {
   it("rejects lock_voucher whose delta + outstanding_locked_amount would exceed vault USDC balance", async function () {
     this.timeout(600_000);
 
+    // ═══ THE ANTI-RUG TEST (and the demo's attack-failure proof) ═══
+    //
+    // Property: lock_voucher's over-commit guard refuses to crystallize a claim
+    // the vault cannot back — `outstanding_locked_amount + delta <= live USDC`.
+    // This is the buyer's attack: fund the vault, get a session authorized,
+    // DRAIN the USDC back out, then try to lock a claim against the now-empty
+    // vault. The chain must reject it (LockWouldOvercommitVault).
+    //
+    // Why a drain is required (proven by algebra in
+    // docs/FINDINGS-lock-overcommit-test.md): with a stable balance, the cap
+    // guard + registration gate already guarantee cumulative <= max_amount <=
+    // balance, so the over-commit guard is unreachable. It ONLY fires when the
+    // live balance DROPS after registration — which is exactly the rug attempt.
+    //
+    // The drain uses the real settle path (settle_tab_voucher + Swig SignV2),
+    // because the vault USDC ATA is owned by the swig wallet PDA and can only
+    // be moved by a swig-authorized transfer. So: fund $5, register, open+settle
+    // a $4 tab (real USDC leaves → balance drops to $1), then lock $5 → rejected.
+    //
+    // We provision via enrollLockableVault (NOT registerSettleableVault) for a
+    // reason that matters to the arithmetic: registerSettleableVault auto-sizes
+    // funding to max(maxAmount, maxRevolvingCapacity) * 4 — it would fund $20,
+    // leaving $16 after a $4 drain, and a $5 lock (capped by max_amount) could
+    // never exceed it, so the over-commit guard would stay unreachable. The
+    // over-commit guard ONLY fires when the live balance drops BELOW the cap.
+    // enrollLockableVault gives exact control of funding ($5 == max_amount), and
+    // its bootstrap installs the settle_tab_voucher ProgramExec marker on swig
+    // role 1, so settleTabAtomic's SignV2 transfer authorizes correctly. The ctx
+    // it returns carries every swig field (swigAddress, swigWalletAddress,
+    // sourceAta, sellerAta) the drain + lock need.
     const ctx = await enrollLockableVault(program, provider, {
-      usdcFundingAmount: 1_000_000n, // only $1 available
-      maxAmount: 5_000_000n,
+      usdcFundingAmount: 5_000_000n, // $5 funded at registration
+      maxAmount: 5_000_000n, // $5 cap — registration passes ($5 + 0 <= $5)
       maxRevolvingCapacity: 5_000_000n,
     });
 
-    await openTab(program, provider, ctx.vaultPda, 2_000_000n);
+    // ── Drain: open a $4 tab and settle it via settle_tab_voucher + Swig SignV2.
+    //    Real USDC ($4) leaves the swig-wallet-owned vault ATA → live balance
+    //    drops from $5 to $1. settleTabAtomic transfers (cumulative − priorSpent)
+    //    = ($4 − $0) = $4 and bumps on-chain `spent` to $4.
+    await openTab(program, provider, ctx.vaultPda, 4_000_000n);
+    const drainVoucher = buildSessionSignedVoucher({
+      sessionKeypair: ctx.sessionKeypair,
+      channelId: ctx.channelId,
+      cumulativeAmount: 4_000_000n,
+      sequenceNumber: 1,
+    });
+    await settleTabAtomic({ program, provider, ctx, voucher: drainVoucher });
 
+    // ── Now attempt to lock $5 against the drained vault. Thread the guards:
+    //    G1 frontier: $5 > max(spent $4, crystallized $0) = $4 → PASSES.
+    //    G2 cap:      $5 <= max_amount $5                      → PASSES.
+    //    delta = cumulative $5 − crystallized $0 = $5.
+    //    G3 over-commit: delta $5 + outstanding $0 = $5 > live balance $1
+    //                    → REJECTS with LockWouldOvercommitVault ← THE TARGET.
     const voucher = buildSessionSignedVoucher({
       sessionKeypair: ctx.sessionKeypair,
       channelId: ctx.channelId,
-      cumulativeAmount: 2_000_000n,
-      sequenceNumber: 1,
+      cumulativeAmount: 5_000_000n,
+      sequenceNumber: 2,
     });
-
     const lockIx = await buildLockVoucherIx({
       program,
       vaultPda: ctx.vaultPda,
@@ -574,7 +620,10 @@ describe("lock_voucher — over-cap rejection", () => {
       threw = true;
       expect(err.toString()).to.match(/LockWouldOvercommitVault/);
     }
-    expect(threw, "lock_voucher should have been rejected (over-cap)").to.equal(true);
+    expect(
+      threw,
+      "lock against a drained vault must be rejected — buyer cannot crystallize an unbacked claim"
+    ).to.equal(true);
   });
 });
 
