@@ -29,6 +29,7 @@
 - **Pin: soft, slice-only.** Only the borrowed amount (+ a buffer) is pinned, not the whole user balance; the user can repay-to-unlock. Enforced by extending the withdrawal-reservation guard to include `borrowed`.
 - **Liquidation: deadline-seize, mirror of recover_abandoned_lock.** After a deadline, the financier can reclaim the borrowed slice from the user's pinned collateral.
 - **Spread/fee = operator policy** (lives in the consumer, like the withdrawal fee + the factoring spread). Not hardcoded in the program.
+- **Buyer-protection = Ζ-gated, DELIBERATELY out of v1.** `open_standby` lets the financier set `standby_cap` and `recovery_window_seconds`. In v1 (the demo) Branch controls BOTH sides, so there is no adversarial financier — sane values are chosen by hand. But in a real two-sided market (Ζ), these two financier-set numbers are **buyer-protection surfaces**: a predatory financier could set a trap-short `recovery_window_seconds` (deadline passes before the buyer's auto-repay can clear → premature seizure) or abusive cap/terms. The anti-rug guards in this plan protect the FINANCIER from the buyer (cap, pin, no-early-seize); the MIRROR protection (buyer from a predatory financier — minimum recovery windows, buyer consent to cap/terms, max effective rate) is a Ζ-scope layer and is **intentionally NOT built here.** This is a documented deferral, not an oversight: building it now is wasted work (no adversarial counterparty in the demo), but a future reader/auditor seeing no buyer-protection on `open_standby` should know it was a deliberate v1 scoping decision, mandatory before real external financiers onboard. (Flagged by the Phase-1/synthesis agent.)
 
 ---
 
@@ -383,6 +384,8 @@ git commit -m "feat(vault-sdk): credit instruction builders (open_standby/draw/r
 - Create: `dexter-vault/tests/credit-lifecycle.ts`, `dexter-vault/tests/credit-antirug.ts`
 
 (Mainnet tests — secp256r1 is mainnet-only. Use the Helius RPC + the shared settle harness `tests/helpers/settle.ts` + `enrollLockableVault` for exact funding. Each provisioning ~140-160s; use `-g` to target.)
+
+**Test framing (v1 = no credit model — the cap + pin + short duration IS the risk management):** v1 credit is short, sub-minute, auto-repaying SLIVERS — there is deliberately NO underwriting / credit-scoring logic (that's Ζ, after the credit graph exists). The safety in v1 comes entirely from three things the tests must prove: the `standby_cap` guard, the collateral pin, and short loan duration with auto-repay-first (`repay_credit` draws `borrowed` down before crediting the user). So the lifecycle test should model the canonical case — float a small amount, auto-repay on the next settlement — not a long-held loan. Keep loans/recovery windows short so the lifecycle runs fast and clean.
 
 - [ ] **Step 1: Happy path — open → draw → repay**
 
