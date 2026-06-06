@@ -19,7 +19,8 @@ pub const VAULT_VERSION_V3: u8 = 3;
 pub const VAULT_VERSION_V4: u8 = 4;
 
 /// V5 appends credit accounting: external-financier standby backing.
-/// `borrowed` is the "buyer is negative" accumulator. New vaults init as V5.
+/// `borrowed` is the "buyer is negative" accumulator. New vaults init as V4;
+/// V5 is reached only by migration (migrate_v4_to_v5), never at init.
 pub const VAULT_VERSION_V5: u8 = 5;
 
 #[account]

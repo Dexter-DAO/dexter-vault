@@ -28,7 +28,7 @@ pub struct RequestWithdrawalArgs {
 pub fn handler(ctx: Context<RequestWithdrawal>, args: RequestWithdrawalArgs) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
     require!(
-        vault.version == VAULT_VERSION_V4 || vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
+        vault.version == VAULT_VERSION_V5 || vault.version == VAULT_VERSION_V4 || vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
         VaultError::UnsupportedVaultVersion
     );
 
