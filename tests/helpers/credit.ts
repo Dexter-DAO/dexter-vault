@@ -44,18 +44,41 @@ import {
   buildSecp256r1VerifyInstruction,
   pollUntilAccount,
 } from "./secp256r1";
-import { fetchSwig, getSignInstructions } from "@swig-wallet/kit";
+import {
+  fetchSwig,
+  getSignInstructions,
+  getAddAuthorityInstructions,
+} from "@swig-wallet/kit";
+import {
+  Actions,
+  createProgramExecAuthorityInfo,
+} from "@swig-wallet/lib";
 import { address as kitAddress, createSolanaRpc } from "@solana/kit";
 import {
   getTransferCheckedInstruction,
   TOKEN_PROGRAM_ADDRESS,
 } from "@solana-program/token";
+import { getAccount } from "@solana/spl-token";
 
 // draw_credit's Anchor discriminator — sha256("global:draw_credit")[..8].
 // This is the ProgramExec marker that lets the [N+1] swig::SignV2 in the
 // draw atomic flow validate against the FINANCIER swig's on-chain marker list.
 export const DRAW_CREDIT_DISCRIMINATOR = new Uint8Array([
   20, 84, 47, 211, 78, 117, 195, 210,
+]);
+
+// repay_credit's Anchor discriminator — sha256("global:repay_credit")[..8].
+// The SignV2 in the repay atomic flow spends the USER's swig_wallet ATA, so
+// THIS marker must be registered on the USER's swig (post-enrollment).
+export const REPAY_CREDIT_DISCRIMINATOR = new Uint8Array([
+  38, 113, 240, 182, 109, 179, 154, 245,
+]);
+
+// seize_collateral's Anchor discriminator — sha256("global:seize_collateral")[..8].
+// The SignV2 in the seize atomic flow spends the USER's swig_wallet ATA, so
+// THIS marker must be registered on the USER's swig (post-enrollment).
+export const SEIZE_COLLATERAL_DISCRIMINATOR = new Uint8Array([
+  40, 250, 7, 243, 168, 184, 116, 154,
 ]);
 
 // The role index the draw_credit marker ends up on when set as the bootstrap
@@ -277,4 +300,255 @@ export async function drawCreditAtomic(
     ...signWeb3Ixs,
   );
   await provider.sendAndConfirm(tx);
+}
+
+/**
+ * (f) registerMarkerOnSwig — add a NEW ProgramExec authority (a fresh role) to
+ * an existing swig, bound to the vault program + a given instruction
+ * discriminator. Mirrors locked-claim-settle.ts::registerSettleLockedVoucherMarker
+ * but generic over the discriminator, and RETURNS the new role index.
+ *
+ * The bootstrap key (role 0, manageAuthority) signs the add. Roles are appended
+ * in order, so the new role index = (number of authorities BEFORE the add).
+ * A fresh bootstrapForRegister swig has role 0 (manageAuthority) + role 1
+ * (ProgramExec, the bootstrap marker) → the first registerMarkerOnSwig returns
+ * role 2, the second returns role 3, and so on.
+ *
+ * Used for repay_credit / seize_collateral markers, which MUST live on the
+ * USER's swig (their SignV2 spends the USER's swig_wallet ATA).
+ */
+export async function registerMarkerOnSwig(args: {
+  provider: anchor.AnchorProvider;
+  swigAddress: PublicKey;
+  vaultProgramId: PublicKey;
+  discriminator: Uint8Array;
+}): Promise<number> {
+  const { provider, swigAddress, vaultProgramId, discriminator } = args;
+  const wallet = (provider.wallet as anchor.Wallet).payer;
+  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+
+  const swigForAdd = await fetchSwig(
+    rpc as any,
+    kitAddress(swigAddress.toBase58()),
+  );
+  if (!swigForAdd) throw new Error("Swig not visible for marker add");
+
+  // The new role index is the count of authorities present before this add.
+  // Swig.roles is the canonical authority list on the fetched swig object.
+  const rolesBefore: any[] =
+    (swigForAdd as any).roles ?? (swigForAdd as any).authorities ?? [];
+  const newRoleIndex = rolesBefore.length;
+
+  const vaultProgramIdBytes = Uint8Array.from(vaultProgramId.toBytes());
+  const markerAuthority = createProgramExecAuthorityInfo(
+    vaultProgramIdBytes,
+    discriminator,
+  );
+  const fullActions = Actions.set().all().get();
+
+  const addAuthorityIxs = await getAddAuthorityInstructions(
+    swigForAdd,
+    0,
+    markerAuthority,
+    fullActions,
+    { payer: kitAddress(wallet.publicKey.toBase58()) },
+  );
+  await provider.sendAndConfirm(
+    new Transaction().add(...kitInstructionsToWeb3(addAuthorityIxs)),
+  );
+
+  return newRoleIndex;
+}
+
+/**
+ * (g) repayCreditAtomic — THE PAYDOWN. Atomic
+ *   [N]   vault::repay_credit  (clamps to borrowed, lowers it, clears deadline at 0)
+ *   [N+1] swig::SignV2(TransferChecked)  (USER swig_wallet ATA → financier ATA)
+ *
+ * Mirrors drawCreditAtomic BUT the swig is the USER's, and the SignV2 routes
+ * through the USER swig role carrying the repay_credit marker (registered via
+ * registerMarkerOnSwig post-enrollment). The transfer amount is the CLAMPED
+ * value = min(amount, borrowed); for a full repay the caller passes
+ * amount = borrowed.
+ */
+export async function repayCreditAtomic(
+  program: Program<DexterVault>,
+  provider: anchor.AnchorProvider,
+  args: {
+    userVaultPda: PublicKey;
+    userSwig: PublicKey;
+    userSwigWalletAddress: PublicKey;
+    userSwigWalletAddrKit: ReturnType<typeof kitAddress>;
+    mint: PublicKey;
+    userSourceAta: PublicKey;
+    financierAta: PublicKey;
+    decimals: number;
+    amount: bigint;
+    repayMarkerRole: number;
+    dexterAuthority: PublicKey;
+  },
+): Promise<void> {
+  const {
+    userVaultPda,
+    userSwig,
+    userSwigWalletAddress,
+    userSwigWalletAddrKit,
+    mint,
+    userSourceAta,
+    financierAta,
+    decimals,
+    amount,
+    repayMarkerRole,
+    dexterAuthority,
+  } = args;
+
+  const wallet = (provider.wallet as anchor.Wallet).payer;
+  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+
+  const repayVaultIx = await program.methods
+    .repayCredit({ amount: new anchor.BN(amount.toString()) })
+    .accountsPartial({
+      swig: userSwig,
+      swigWalletAddress: userSwigWalletAddress,
+      vault: userVaultPda,
+      dexterAuthority,
+      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+    })
+    .instruction();
+
+  const transferKitIx = getTransferCheckedInstruction(
+    {
+      source: kitAddress(userSourceAta.toBase58()),
+      mint: kitAddress(mint.toBase58()),
+      destination: kitAddress(financierAta.toBase58()),
+      authority: userSwigWalletAddrKit,
+      amount,
+      decimals,
+    },
+    { programAddress: TOKEN_PROGRAM_ADDRESS },
+  );
+
+  const swigForSign = await fetchSwig(
+    rpc as any,
+    kitAddress(userSwig.toBase58()),
+  );
+  if (!swigForSign) throw new Error("User swig not visible for sign");
+
+  const signKitIxs = await getSignInstructions(
+    swigForSign,
+    repayMarkerRole,
+    [transferKitIx],
+    false,
+    {
+      payer: kitAddress(wallet.publicKey.toBase58()),
+      preInstructions: [repayVaultIx as any],
+    },
+  );
+  const signWeb3Ixs: TransactionInstruction[] = kitInstructionsToWeb3(signKitIxs);
+
+  const tx = new Transaction().add(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
+    ...signWeb3Ixs,
+  );
+  await provider.sendAndConfirm(tx);
+}
+
+/**
+ * (h) seizeCollateralAtomic — THE DEADLINE LIQUIDATION. Atomic
+ *   [N]   vault::seize_collateral (after deadline: snapshots seized=borrowed, zeroes it)
+ *   [N+1] swig::SignV2(TransferChecked)  (USER swig_wallet ATA → financier ATA)
+ *
+ * Same as repayCreditAtomic but no amount arg (the program seizes exactly the
+ * borrowed snapshot). The caller passes `seized` = borrowed-before so the SignV2
+ * transfers exactly that. USER swig; marker registered post-enrollment.
+ */
+export async function seizeCollateralAtomic(
+  program: Program<DexterVault>,
+  provider: anchor.AnchorProvider,
+  args: {
+    userVaultPda: PublicKey;
+    userSwig: PublicKey;
+    userSwigWalletAddress: PublicKey;
+    userSwigWalletAddrKit: ReturnType<typeof kitAddress>;
+    mint: PublicKey;
+    userSourceAta: PublicKey;
+    financierAta: PublicKey;
+    decimals: number;
+    seized: bigint;
+    seizeMarkerRole: number;
+    dexterAuthority: PublicKey;
+  },
+): Promise<void> {
+  const {
+    userVaultPda,
+    userSwig,
+    userSwigWalletAddress,
+    userSwigWalletAddrKit,
+    mint,
+    userSourceAta,
+    financierAta,
+    decimals,
+    seized,
+    seizeMarkerRole,
+    dexterAuthority,
+  } = args;
+
+  const wallet = (provider.wallet as anchor.Wallet).payer;
+  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+
+  const seizeVaultIx = await program.methods
+    .seizeCollateral({})
+    .accountsPartial({
+      swig: userSwig,
+      swigWalletAddress: userSwigWalletAddress,
+      vault: userVaultPda,
+      dexterAuthority,
+      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+    })
+    .instruction();
+
+  const transferKitIx = getTransferCheckedInstruction(
+    {
+      source: kitAddress(userSourceAta.toBase58()),
+      mint: kitAddress(mint.toBase58()),
+      destination: kitAddress(financierAta.toBase58()),
+      authority: userSwigWalletAddrKit,
+      amount: seized,
+      decimals,
+    },
+    { programAddress: TOKEN_PROGRAM_ADDRESS },
+  );
+
+  const swigForSign = await fetchSwig(
+    rpc as any,
+    kitAddress(userSwig.toBase58()),
+  );
+  if (!swigForSign) throw new Error("User swig not visible for sign");
+
+  const signKitIxs = await getSignInstructions(
+    swigForSign,
+    seizeMarkerRole,
+    [transferKitIx],
+    false,
+    {
+      payer: kitAddress(wallet.publicKey.toBase58()),
+      preInstructions: [seizeVaultIx as any],
+    },
+  );
+  const signWeb3Ixs: TransactionInstruction[] = kitInstructionsToWeb3(signKitIxs);
+
+  const tx = new Transaction().add(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
+    ...signWeb3Ixs,
+  );
+  await provider.sendAndConfirm(tx);
+}
+
+/** Convenience: read an SPL token account amount at finalized commitment. */
+export async function ataAmount(
+  provider: anchor.AnchorProvider,
+  ata: PublicKey,
+): Promise<bigint> {
+  const acct = await getAccount(provider.connection, ata, "finalized");
+  return acct.amount;
 }
