@@ -146,9 +146,14 @@ describe("finalize_withdrawal — reservation gate", () => {
       maxRevolvingCapacity: 5_000_000n,
     });
 
-    // Open tab on the credex meter, then lock the full $5 into a
-    // LockedClaim (graduating session → vault tier).
-    await openTab(program, provider, ctx.vaultPda, 5_000_000n);
+    // Lock $5 into a LockedClaim (graduates session → vault tier:
+    // outstanding_locked_amount = $5). We deliberately do NOT open a tab first:
+    // settle_voucher(increment) would bump pending_voucher_count > 0, which
+    // would trip finalize_withdrawal's FIRST guard (PendingVouchersExist) before
+    // the reservation guard we are testing. lock_voucher does not require a prior
+    // open (its current_outstanding -= delta uses saturating_sub), so locking
+    // directly leaves pending_voucher_count == 0 and isolates the RESERVATION
+    // guard (WithdrawalWouldViolateReservation) as the one that must fire.
     await lockAmount(ctx, 5_000_000n, 1);
 
     const destination = Keypair.generate().publicKey;
@@ -166,6 +171,11 @@ describe("finalize_withdrawal — reservation gate", () => {
       );
     } catch (err: any) {
       threw = true;
+      // STRICT: the RESERVATION guard specifically must fire (not the pending-
+      // voucher guard). Locking without a prior open keeps pending_voucher_count
+      // at 0, so finalize_withdrawal reaches and trips WithdrawalWouldViolateReservation
+      // ($10 - $7 = $3 < $5 locked). This is the on-chain anti-rug proof that the
+      // buyer cannot withdraw funds out from under a crystallized claim.
       expect(String(err)).to.match(/WithdrawalWouldViolateReservation/);
     }
     expect(threw, "withdrawal that would violate reservation must reject").to.equal(true);
