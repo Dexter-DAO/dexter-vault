@@ -112,6 +112,21 @@ pub fn handler(ctx: Context<FinalizeWithdrawal>, args: FinalizeWithdrawalArgs) -
         VaultError::WithdrawalWouldViolateReservation
     );
 
+    // Credit pin (V5): borrowed collateral is reserved until repaid/seized, on
+    // TOP of the crystallized locked amount. The user cannot withdraw collateral
+    // backing an open loan. Kept as a SEPARATE check from the reservation above so
+    // the existing locked-amount breach keeps reporting WithdrawalWouldViolateReservation
+    // (unchanged, already-deployed semantics) and a borrow breach gets its own
+    // precisely-attributed WithdrawalWouldViolatePin.
+    let reserved = vault
+        .outstanding_locked_amount
+        .checked_add(vault.borrowed)
+        .ok_or(VaultError::WithdrawalWouldViolatePin)?;
+    require!(
+        live_balance_after >= reserved,
+        VaultError::WithdrawalWouldViolatePin
+    );
+
     let mut op_msg = Vec::with_capacity(b"finalize_withdrawal".len() + 8 + 32);
     op_msg.extend_from_slice(b"finalize_withdrawal");
     op_msg.extend_from_slice(&pending.amount.to_le_bytes());
