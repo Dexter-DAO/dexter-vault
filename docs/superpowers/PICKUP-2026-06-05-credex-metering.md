@@ -283,6 +283,48 @@ doesn't) → use dangerouslyDisableSandbox on mainnet RPC calls.
   my `spent`. spent = tab-close settles; crystallized = locks.
 - Tighten the turnover-demo assertion `>1` → `>= ROUNDS*CLAIM/REVOLVING` (one-liner, my TODO).
 
+# ===== PHASE 1 PROGRESS (2026-06-06) — BUILD COMPLETE, AWAITING COMBINED DEPLOY =====
+
+Phase 1 (LockedClaim crystallized tier) is BUILD-COMPLETE across both halves and the SDK.
+Nothing deployed/published — all staged build-only, awaiting Branch's combined deploy gate.
+
+**THE COMBINED DEPLOY CHECKLIST IS THE KEY DOC:** `docs/superpowers/COMBINED-PHASE-1-DEPLOY-CHECKLIST.md`
+Read it first — it sequences all three coupled pieces (migration + LockedClaim + SDK 0.4.2)
+as ONE atomic deploy window. They MUST flip together (program upgrade + SDK publish + migration).
+
+**The three coupled pieces (all staged, all unpushed):**
+1. **Migration half** (credex, dexter-vault `main`): `migrate_v3_to_v4` (decode-V3/re-encode-V4,
+   handles Some-session interior growth) + V4 struct fields + version gates. Built, reviewed
+   (3 gates each), green. M4 test gated behind RUN_MIGRATION_PROOF=1. Commits a6ae417..ab9a18f.
+2. **LockedClaim half** (other agent, dexter-vault `main`): 4 new instructions + 2 modified
+   (settle_tab frontier guard, register/finalize reservation gates) + LockedClaim account +
+   5 errors. .so hash 2920d27c..., 19 instructions, 20 errors. Commits d15e27a..c4d9fe5.
+   SEAM REVIEW DONE by credex — all 4 meeting points approved, zero open questions
+   (the active_session Some-asymmetry is guarded by NoActiveSession require @ lock_voucher.rs:159).
+3. **SDK 0.4.2** (credex, dexter-vault-sdk `main`): register builder 2→5 accounts, finalize
+   builder 4→5 accounts (Phase 1 added vault_usdc_ata + swig + swig_wallet_address for live-USDC
+   gating). DATA byte-unchanged, only keys grew. 81/81 tests. NOT PUBLISHED (registry still 0.4.1).
+   Commits 998d7b5, 3502f5b, cb25bcb. Plan: dexter-vault-sdk/docs/superpowers/plans/2026-06-06-sdk-0.4.2-phase1-account-lists.md
+
+**Why SDK 0.4.2 is coupled (the non-obvious bit):** Phase 1 changed the ON-CHAIN account lists
+of register_session_key (2→5) and finalize_withdrawal (4→5). Published 0.4.1 builders emit the
+OLD lists → every client breaks the instant the program upgrades. 0.4.2 must publish IN the same
+deploy window. (This is why the Thread B "gate" register test is it.skip'd until 0.4.2 ships.)
+
+**Env fix done:** created dexter-vault/.env (gitignored, Helius key) so the plan's "read from
+dexter-vault/.env" is true. ALWAYS Helius, never mainnet-beta (mainnet-beta caused all the flakes).
+
+**Harness fix done (3bc7c39):** registerSettleableVault had a Swig/ATA read-after-write replica
+race (SPL getOrCreateAssociatedTokenAccount swallows errors + single non-retry read). Fixed with
+createAtaIdempotentFinalized (poll-until-finalized helper in tests/helpers/secp256r1.ts). The 5x
+proof is green twice on Helius. His Tasks 7/8 reservation tests use this — they'd have hit the race.
+
+**NEXT: Branch executes the combined deploy checklist when ready.** That's the gate. After it:
+collective post-deploy test run (the 2 XOR tests are the load-bearing crystallized-tier proof),
+then bump consumers to 0.4.2, then push.
+
+---
+
 # ===== THREAD B PROGRESS (2026-06-05 afternoon) =====
 
 Thread B (client stack V1/180 → V2/188) executed subagent-driven, opus, TDD, two-stage
