@@ -162,11 +162,13 @@ three rejections work; Phase 3 wraps them in a demo UI.
 - **[CONFIRMED UNDONE] Tighten the turnover-demo assertion.** `tests/revolving-meter.ts:349` is
   still `expect(turnover).to.be.greaterThan(1)`. Seam-spec Q-OPEN-3 agreed to tighten it to
   `>= ROUNDS*CLAIM/REVOLVING` so it proves 5x SPECIFICALLY, not just ">1x". One-liner. Trivial.
-- **[CONFIRMED UNDONE] Dead V1 register-domain constant.** `dexter-vault-sdk/src/constants/index.ts:60`
-  still exports `OTS_SESSION_REGISTER_V1_DOMAIN` — now unused (register path is V2). Flagged as
-  "optional cleanup" in the Thread B final review. CAVEAT before deleting: confirm the REVOKE path
-  doesn't still legitimately use a V1 domain (there's also OTS_SESSION_REVOKE_V1_DOMAIN — different
-  constant, likely still live). 5-second check, then delete the register one.
+- **[RESOLVED — LEAVE IT] V1 register-domain constant.** CHECKED 2026-06-06:
+  `OTS_SESSION_REGISTER_V1_DOMAIN` (constants/index.ts:60) is used by NO production code — only by a
+  byte-parity test that snapshots it (byte-parity.test.ts:91). So it's not "dead tech debt," it's a
+  documented historical byte-parity artifact (proof of the V1 layout pre-migration). Deleting it
+  would mean deleting its test too, for ~zero benefit. VERDICT: leave it. (Note: `OTS_SESSION_REVOKE_V1_DOMAIN`
+  is a SEPARATE constant that IS still live — session.ts:85 builds the revoke message with it. Don't
+  confuse the two.) This nit is CLOSED, not deferred.
 - **[NICE-TO-HAVE] `registerSettleableVault` 4x auto-funding footgun.** tests/helpers/settle.ts
   auto-funds `4 * max(maxAmount, maxRevolvingCapacity)`. This caused a FALSE-PASS trap in the
   over-cap test (over-funded → guard unreachable → test would've passed for nothing). It's fine as

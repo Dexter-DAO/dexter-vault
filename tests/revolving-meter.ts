@@ -346,6 +346,12 @@ describe("turnover-demo: credex proof (turnover > 1)", () => {
 
     expect(settled).to.equal(ROUNDS * CLAIM);            // $10 cleared
     expect(s.currentOutstanding.toNumber()).to.equal(0); // fully revolved
-    expect(turnover).to.be.greaterThan(1);               // THE clearing proof
+    // THE clearing proof. Tightened from `> 1` (which only proves "revolved at
+    // all") to the EXACT expected turnover: ROUNDS*CLAIM settled over REVOLVING
+    // capacity = 10*$1/$2 = 5x. This catches "revolved, but the wrong amount" —
+    // a bug that settled e.g. $3 instead of $10 would pass `> 1` (1.5x) but fail
+    // here. Per seam-spec Q-OPEN-3.
+    const expectedTurnover = (ROUNDS * CLAIM) / REVOLVING; // = 5
+    expect(turnover).to.equal(expectedTurnover);
   });
 });
