@@ -34,10 +34,13 @@ use crate::state::*;
 ///
 /// A V4 account MATCHES the frozen `VaultV4` struct EXACTLY (it was written under
 /// that very layout), so decoding it against `VaultV4` cannot over-run — every
-/// byte the decoder reads is present. We still take the vault as a `/// CHECK:`'d
-/// `AccountInfo` rather than `Account<'info, Vault>` so Anchor does NOT
-/// auto-deserialize it against the LARGER current (V5) struct on entry — that
-/// WOULD over-run the still-V4-sized buffer.
+/// byte the decoder reads is present. (Ground truth, mainnet 2026-06-07: all 50
+/// V4 vaults are exactly 341 bytes = 8-byte discriminator + V4 `INIT_SPACE`, and
+/// every one carries version byte == 4. The decoder reads a strict prefix of that
+/// 341-byte buffer, so it cannot over-run.) We still take the vault as a
+/// `/// CHECK:`'d `AccountInfo` rather than `Account<'info, Vault>` so Anchor does
+/// NOT auto-deserialize it against the LARGER current (V5) struct on entry — that
+/// WOULD over-run the still-V4-sized 341-byte buffer.
 ///
 /// # Legacy-vault note: the 4 new credit fields migrate to neutral defaults
 ///
