@@ -76,8 +76,14 @@ describe("Credit-L2 S2 — open → draw → repay (full lifecycle)", () => {
       usdcFundingAmount: 10_000_000n,
     });
     // USER — funded $5 so it can later repay $3 from its OWN swig_wallet ATA.
+    // CRITICAL: enroll on the FINANCIER's mint (shared mint). Credit is
+    // same-token: draw moves financier→seller and repay moves user→financier,
+    // all in ONE mint. Without sharing, the repay SignV2 sends user-mint tokens
+    // to a financier-mint ATA → SPL token 0x3 "Account not associated with this
+    // Mint". (This was the S2 harness bug in the first mainnet run.)
     const user = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: 5_000_000n,
+      mint: financier.mint,
     });
     await migrateVaultToV5(program, provider, user.vaultPda);
 
@@ -390,8 +396,11 @@ describe("Credit-L2 S10 — happy seize after the deadline", () => {
       usdcFundingAmount: 10_000_000n,
     });
     // USER funded $2 so the collateral exists in its swig_wallet ATA to be seized.
+    // Shared mint (financier's): seize moves user→financier in ONE token, so
+    // both vaults + all ATAs must be on the same mint (else SPL token 0x3).
     const user = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: 2_000_000n,
+      mint: financier.mint,
     });
     await migrateVaultToV5(program, provider, user.vaultPda);
 
@@ -416,7 +425,7 @@ describe("Credit-L2 S10 — happy seize after the deadline", () => {
     const financierDestAta = await createAtaIdempotentFinalized(
       provider,
       wallet,
-      user.mint,
+      financier.mint, // shared mint (== user.mint now); the seize lands here
       financierDest.publicKey,
     );
 

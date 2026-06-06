@@ -753,11 +753,22 @@ describe("Credit-L2 S7 — draw signed through a role lacking the draw_credit ma
       threw,
       "draw signed through a role lacking the draw_credit marker should fail",
     ).to.equal(true);
-    // Tighten to the SPECIFIC on-chain failure (set after capturing the real
-    // string in the first mainnet run — see report).
-    expect(errStr).to.match(
-      /custom program error|PermissionDenied|Swig|InvalidAuthority|0x/,
-    );
+    // The SPECIFIC, correct rejection: Swig's SignV2 ProgramExec validator
+    // checks that the PRECEDING instruction's discriminator is a registered
+    // marker on this swig. Routing the draw through the repay_credit marker
+    // role means the draw_credit discriminator isn't registered there, so the
+    // preceding-instruction-data check fails. Asserting this exact string (not
+    // a loose 0x/Swig catch-all) proves the draw was rejected for the RIGHT
+    // reason — marker mismatch — and not some incidental setup failure.
+    // Match only the STABLE, unambiguous prefix. The Swig rejection string is
+    // "Preceding instruction data …" — mocha truncates the tail in its reporter
+    // ("…doe…") and the exact back-half wording ("does not"/"doesn't"/"doesn't
+    // match") isn't observable from the log, so we assert just the prefix, which
+    // is unique to THIS rejection: the SignV2 ProgramExec validator found that
+    // the preceding instruction's discriminator isn't a registered marker on
+    // this swig. No other failure produces this phrase, so the prefix alone
+    // proves the draw was rejected for the RIGHT reason (marker mismatch).
+    expect(errStr).to.match(/[Pp]receding instruction data/);
     console.log("    [S7] captured error:", errStr.split("\n")[0]);
 
     // Money never moved; borrowed never rose (the atomic tx reverted whole).

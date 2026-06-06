@@ -154,6 +154,13 @@ export interface BootstrapOpts {
   /** Role-1 ProgramExec marker. Defaults to settle_tab_voucher (matches
    *  lock_voucher / settle tests). */
   programExecMarker?: Uint8Array;
+  /** Optional existing mint to enroll this vault on. When omitted, a fresh
+   *  6-decimal mint is created. Credit tests pass a SHARED mint so the
+   *  financier and user transact in the SAME token — without this, repay/seize
+   *  SignV2 transfers fail with the SPL token program's "Account not associated
+   *  with this Mint" (0x3), because two vaults would otherwise hold ATAs on two
+   *  different mints. Real credit is same-token (USDC); this mirrors that. */
+  mint?: PublicKey;
 }
 
 /**
@@ -265,15 +272,17 @@ export async function bootstrapForRegister(
   );
 
   // ── Mint + funded swig-wallet ATA. ────────────────────────────────────────
+  // Reuse a caller-supplied mint (credit tests share ONE mint across the
+  // financier + user vaults so cross-vault SignV2 transfers don't hit the SPL
+  // token program's mint-mismatch error). Otherwise mint a fresh 6-decimal one.
   const decimals = 6;
-  const mint = await createMint(
-    connection,
-    wallet,
-    wallet.publicKey,
-    null,
-    decimals,
-  );
-  await pollUntilAccountExists(connection, mint);
+  let mint: PublicKey;
+  if (opts.mint) {
+    mint = opts.mint;
+  } else {
+    mint = await createMint(connection, wallet, wallet.publicKey, null, decimals);
+    await pollUntilAccountExists(connection, mint);
+  }
 
   const swigForWallet = await fetchSwig(
     rpc as any,
