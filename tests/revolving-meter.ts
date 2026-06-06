@@ -27,6 +27,10 @@ import {
   pollUntilAccount,
   createAtaIdempotentFinalized,
 } from "./helpers/secp256r1";
+import {
+  bootstrapForRegister,
+  registerSessionV2,
+} from "./helpers/register-bootstrap";
 
 import {
   fetchSwig,
@@ -201,71 +205,35 @@ async function registerSessionWithCapacity(
   provider: anchor.AnchorProvider,
   opts: { maxAmount: number; maxRevolvingCapacity: number }
 ): Promise<LeanVaultContext> {
-  const identityClaim = new Uint8Array(32);
-  crypto.getRandomValues(identityClaim);
-  const passkey: P256Keypair = generateP256Keypair();
-  const [vaultPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("vault"), Buffer.from(identityClaim.slice(0, 16))],
-    program.programId
-  );
-  await program.methods
-    .initializeVault({
-      passkeyPubkey: Array.from(passkey.publicKey),
-      coolingOffSeconds: 0,
-      identityClaim: Array.from(identityClaim),
-    })
-    .accountsPartial({
-      vault: vaultPda,
-      payer: provider.wallet.publicKey,
-      dexterAuthority: provider.wallet.publicKey,
-      systemProgram: SystemProgram.programId,
-    })
-    .rpc();
-
-  const sessionKeypair = Keypair.generate();
-  const sessionPubkey = sessionKeypair.publicKey.toBytes();
-  const allowedCounterparty = Keypair.generate().publicKey;
-  const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-  const nonce = 1;
+  // Task 8 made register_session_key require the swig + vault_usdc_ata
+  // account triple and enforce the overcommit invariant against the live ATA
+  // balance. We can no longer register against a bare vault — every register
+  // call now needs Swig + a funded source ATA in place. The bootstrap helper
+  // does the full provisioning; we then drive a V2/188 registration with
+  // funding sized so combined = maxAmount + 0 ≤ funding holds trivially.
   const maxAmount = BigInt(opts.maxAmount);
   const maxRevolvingCapacity = BigInt(opts.maxRevolvingCapacity);
+  // Fund well above maxAmount so the gate passes by a wide margin.
+  const usdcFundingAmount = maxAmount * 4n + 1_000_000n;
 
-  const msg = sessionRegisterMessageV2({
-    programId: program.programId,
-    vaultPda,
-    sessionPubkey,
+  const bootstrap = await bootstrapForRegister(program, provider, {
+    usdcFundingAmount,
+  });
+
+  const { sessionKeypair } = await registerSessionV2(program, provider, {
+    vaultPda: bootstrap.vaultPda,
+    passkey: bootstrap.passkey,
+    vaultUsdcAta: bootstrap.sourceAta,
+    swigAddress: bootstrap.swigAddress,
+    swigWalletAddress: bootstrap.swigWalletAddress,
     maxAmount,
-    expiresAt,
-    allowedCounterparty,
-    nonce,
     maxRevolvingCapacity,
   });
-  const signed = signOperationWithPasskey(passkey, msg);
-  const precompileIx = buildSecp256r1VerifyInstruction(
-    passkey.publicKey,
-    signed.signature,
-    signed.precompileMessage
-  );
-  const vaultIx = await program.methods
-    .registerSessionKey({
-      sessionPubkey: Array.from(sessionPubkey),
-      maxAmount: new anchor.BN(maxAmount.toString()),
-      expiresAt: new anchor.BN(expiresAt.toString()),
-      allowedCounterparty,
-      nonce,
-      maxRevolvingCapacity: new anchor.BN(maxRevolvingCapacity.toString()),
-      clientDataJson: Buffer.from(signed.clientDataJSON),
-      authenticatorData: Buffer.from(signed.authenticatorData),
-    })
-    .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
-    .instruction();
-  const tx = new Transaction().add(precompileIx, vaultIx);
-  await provider.sendAndConfirm(tx);
 
   const channelId = new Uint8Array(32);
   crypto.getRandomValues(channelId);
 
-  return { vaultPda, sessionKeypair, channelId };
+  return { vaultPda: bootstrap.vaultPda, sessionKeypair, channelId };
 }
 
 /**
@@ -290,189 +258,43 @@ async function registerSettleableVault(
 ): Promise<MeterVaultContext> {
   const connection = provider.connection;
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(connection.rpcEndpoint);
-
-  const identityClaim = new Uint8Array(32);
-  crypto.getRandomValues(identityClaim);
-  const passkey: P256Keypair = generateP256Keypair();
-  const [vaultPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("vault"), Buffer.from(identityClaim.slice(0, 16))],
-    program.programId
-  );
-  await program.methods
-    .initializeVault({
-      passkeyPubkey: Array.from(passkey.publicKey),
-      coolingOffSeconds: 0,
-      identityClaim: Array.from(identityClaim),
-    })
-    .accountsPartial({
-      vault: vaultPda,
-      payer: provider.wallet.publicKey,
-      dexterAuthority: provider.wallet.publicKey,
-      systemProgram: SystemProgram.programId,
-    })
-    .rpc();
-
-  // The session key is a REAL Ed25519 keypair we retain — settle() signs the
-  // voucher with its secret. (The prior version discarded it after taking the
-  // pubkey, which made settle impossible.)
-  const sessionKeypair = Keypair.generate();
-  const sessionPubkey = sessionKeypair.publicKey.toBytes();
-  const allowedCounterparty = Keypair.generate().publicKey;
-  const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-  const nonce = 1;
   const maxAmount = BigInt(opts.maxAmount);
   const maxRevolvingCapacity = BigInt(opts.maxRevolvingCapacity);
 
-  const msg = sessionRegisterMessageV2({
-    programId: program.programId,
-    vaultPda,
-    sessionPubkey,
+  // Task 8 made register_session_key require the swig + vault_usdc_ata triple
+  // and enforce the overcommit invariant against the live ATA balance. The
+  // ordering is therefore: initialize_vault → swig create/add/set → fund ATA
+  // → register_session_key. The bootstrap helper handles the whole swig + ATA
+  // pre-step; we then register against the funded ATA.
+  //
+  // The settle leg of the meter test transfers via Swig::SignV2 through the
+  // settle_tab_voucher marker on role 1 — the bootstrap helper's default
+  // ProgramExec marker matches. FUND_AMOUNT is sized so combined =
+  // maxAmount + 0 ≤ funding holds, and the settle path has headroom.
+  const FUND_AMOUNT =
+    BigInt(Math.max(opts.maxAmount, opts.maxRevolvingCapacity)) * 4n;
+
+  const bootstrap = await bootstrapForRegister(program, provider, {
+    usdcFundingAmount: FUND_AMOUNT,
+  });
+
+  const { sessionKeypair } = await registerSessionV2(program, provider, {
+    vaultPda: bootstrap.vaultPda,
+    passkey: bootstrap.passkey,
+    vaultUsdcAta: bootstrap.sourceAta,
+    swigAddress: bootstrap.swigAddress,
+    swigWalletAddress: bootstrap.swigWalletAddress,
     maxAmount,
-    expiresAt,
-    allowedCounterparty,
-    nonce,
     maxRevolvingCapacity,
   });
-  const signed = signOperationWithPasskey(passkey, msg);
-  const precompileIx = buildSecp256r1VerifyInstruction(
-    passkey.publicKey,
-    signed.signature,
-    signed.precompileMessage
-  );
-  const vaultIx = await program.methods
-    .registerSessionKey({
-      sessionPubkey: Array.from(sessionPubkey),
-      maxAmount: new anchor.BN(maxAmount.toString()),
-      expiresAt: new anchor.BN(expiresAt.toString()),
-      allowedCounterparty,
-      nonce,
-      maxRevolvingCapacity: new anchor.BN(maxRevolvingCapacity.toString()),
-      clientDataJson: Buffer.from(signed.clientDataJSON),
-      authenticatorData: Buffer.from(signed.authenticatorData),
-    })
-    .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
-    .instruction();
-  const tx = new Transaction().add(precompileIx, vaultIx);
-  await provider.sendAndConfirm(tx);
 
-  // ── Real Swig: role 0 bootstrap (manageAuthority) + role 1 ProgramExec
-  //    (vault, settle_tab_voucher). Mirrors swig-settle-flow.ts step 2, with
-  //    the settle marker instead of the finalize marker. ────────────────────
-  const swigId = new Uint8Array(32);
-  crypto.getRandomValues(swigId);
-  const swigPdaKit = await findSwigPda(swigId);
-  const swigAddress = new PublicKey(String(swigPdaKit));
-
-  const bootstrapAuthority = createEd25519AuthorityInfo(
-    Uint8Array.from(wallet.publicKey.toBytes())
-  );
-  const bootstrapActions = Actions.set().manageAuthority().get();
-
-  const vaultProgramIdBytes = Uint8Array.from(program.programId.toBytes());
-  const vaultAuthority = createProgramExecAuthorityInfo(
-    vaultProgramIdBytes,
-    SETTLE_TAB_VOUCHER_DISCRIMINATOR
-  );
-  const vaultActions = Actions.set().all().get();
-
-  const createSwigCtx = await getCreateSwigInstruction({
-    payer: kitAddress(wallet.publicKey.toBase58()),
-    id: swigId,
-    actions: bootstrapActions,
-    authorityInfo: bootstrapAuthority,
-  });
-  const createSwigTx = new Transaction().add(
-    ...kitInstructionsToWeb3([createSwigCtx])
-  );
-  await provider.sendAndConfirm(createSwigTx);
-
-  // Cast through `any`: @swig-wallet/coder ships a nested copy of @solana/*
-  // types, so the rpc shape isn't structurally identical even though it's the
-  // same runtime object. Standard kit/coder duplicated-deps workaround
-  // (identical to swig-settle-flow.ts).
-  const swigForAdd = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
-  if (!swigForAdd) throw new Error("Swig not visible post-create");
-  const addAuthorityIxs = await getAddAuthorityInstructions(
-    swigForAdd,
-    0, // acting role = bootstrap
-    vaultAuthority,
-    vaultActions,
-    { payer: kitAddress(wallet.publicKey.toBase58()) }
-  );
-  const addTx = new Transaction().add(...kitInstructionsToWeb3(addAuthorityIxs));
-  await provider.sendAndConfirm(addTx);
-
-  // ── set_swig — passkey signs, binding the vault to the real Swig. ─────────
-  const setSwigOp = setSwigMessage(swigAddress);
-  const setSwigSigned = signOperationWithPasskey(passkey, setSwigOp);
-  const setSwigPrecompile = buildSecp256r1VerifyInstruction(
-    passkey.publicKey,
-    setSwigSigned.signature,
-    setSwigSigned.precompileMessage
-  );
-  const setSwigVaultIx = await program.methods
-    .setSwig({
-      swigAddress,
-      clientDataJson: Buffer.from(setSwigSigned.clientDataJSON),
-      authenticatorData: Buffer.from(setSwigSigned.authenticatorData),
-    })
-    .accountsPartial({
-      vault: vaultPda,
-      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-    })
-    .instruction();
-  const setSwigTx = new Transaction().add(setSwigPrecompile, setSwigVaultIx);
-  await provider.sendAndConfirm(setSwigTx);
-
-  // ── Fresh mint + funded source ATA (swig wallet) + seller ATA. ────────────
-  // Every SPL-token setup step below is hardened against Helius read-replica
-  // lag. `createMint`/`mintTo` confirm at `confirmed` and then the NEXT step
-  // reads the account back; on a lagging replica that read misses and the
-  // SPL-token program / library throws (InvalidAccountData reading the mint, or
-  // TokenAccountNotFoundError reading a fresh ATA). After each account-creating
-  // tx we poll getAccountInfo at `finalized` until the account materializes,
-  // and we create ATAs with the idempotent + polled helper instead of the racy
-  // getOrCreateAssociatedTokenAccount.
-  const decimals = 6; // mimic USDC
-  const mint = await createMint(connection, wallet, wallet.publicKey, null, decimals);
-  // Guard: the very next thing that touches `mint` is createAtaIdempotent, whose
-  // create-ATA instruction reads the mint on-chain. If the mint hasn't
-  // propagated to the replica, that read fails with InvalidAccountData. Wait
-  // until the mint is visible at finalized before deriving/initializing ATAs.
-  await pollUntilAccountExists(connection, mint);
-
-  const swigForWallet = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
-  if (!swigForWallet) throw new Error("Swig not visible for wallet derivation");
-  const swigWalletAddrKit = await getSwigWalletAddress(swigForWallet);
-  const swigWalletAddress = new PublicKey(String(swigWalletAddrKit));
-
-  const sourceAta = await createAtaIdempotentFinalized(
-    provider,
-    wallet,
-    mint,
-    swigWalletAddress,
-    true /* allowOwnerOffCurve — swig wallet is a PDA */
-  );
-
-  // Fund the source ATA with enough to cover any settle a meter test would run
-  // (max_revolving_capacity is the practical ceiling on cumulative exposure).
-  const FUND_AMOUNT = BigInt(Math.max(opts.maxAmount, opts.maxRevolvingCapacity)) * 4n;
-  await mintTo(connection, wallet, mint, sourceAta, wallet, FUND_AMOUNT);
-  // Guard: the settle loop's first SignV2 TransferChecked debits sourceAta. If
-  // the mintTo credit hasn't propagated, the transfer underflows. Poll until
-  // the funded balance is visible at finalized.
-  await pollUntilAccount(
-    () => getAccount(connection, sourceAta, "finalized"),
-    (acct) => acct.amount >= FUND_AMOUNT,
-  );
-
+  // Seller ATA — the settle credit destination. Independent of the bootstrap.
   const sellerOwner = Keypair.generate().publicKey;
   const sellerAta = await createAtaIdempotentFinalized(
     provider,
     wallet,
-    mint,
-    sellerOwner
+    bootstrap.mint,
+    sellerOwner,
   );
 
   // Stable per-vault channel id for the voucher payload.
@@ -480,16 +302,16 @@ async function registerSettleableVault(
   crypto.getRandomValues(channelId);
 
   return {
-    vaultPda,
+    vaultPda: bootstrap.vaultPda,
     sessionKeypair,
     channelId,
-    swigAddress,
-    swigWalletAddress,
-    swigWalletAddrKit,
-    mint,
-    sourceAta,
+    swigAddress: bootstrap.swigAddress,
+    swigWalletAddress: bootstrap.swigWalletAddress,
+    swigWalletAddrKit: bootstrap.swigWalletAddrKit,
+    mint: bootstrap.mint,
+    sourceAta: bootstrap.sourceAta,
     sellerAta,
-    decimals,
+    decimals: bootstrap.decimals,
   };
 }
 

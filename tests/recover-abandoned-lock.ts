@@ -44,6 +44,10 @@ import {
   makeTestProvider,
 } from "./helpers/secp256r1";
 import {
+  bootstrapForRegister,
+  registerSessionV2,
+} from "./helpers/register-bootstrap";
+import {
   fetchSwig,
   findSwigPda,
   getCreateSwigInstruction,
@@ -153,175 +157,38 @@ async function enrollVault(
   maxAmount: bigint,
   maxRevolvingCapacity: bigint
 ): Promise<EnrolledVault> {
-  const connection = provider.connection;
-  const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(connection.rpcEndpoint);
+  // Task 8 made register_session_key require the swig + vault_usdc_ata triple
+  // and enforce the overcommit invariant against the live ATA balance. So
+  // the order MUST be: initialize_vault → swig create/add/set → fund ATA →
+  // register_session_key. The bootstrap helper handles the pre-step; then we
+  // register with the funded ATA in scope so the gate `combined ≤ amount`
+  // holds.
+  const bootstrap = await bootstrapForRegister(program, provider, {
+    usdcFundingAmount,
+  });
 
-  const identityClaim = new Uint8Array(32);
-  crypto.getRandomValues(identityClaim);
-  const passkey: P256Keypair = generateP256Keypair();
-  const [vaultPda] = PublicKey.findProgramAddressSync(
-    [Buffer.from("vault"), Buffer.from(identityClaim.slice(0, 16))],
-    program.programId
-  );
-
-  await program.methods
-    .initializeVault({
-      passkeyPubkey: Array.from(passkey.publicKey),
-      coolingOffSeconds: 0,
-      identityClaim: Array.from(identityClaim),
-    })
-    .accountsPartial({
-      vault: vaultPda,
-      payer: provider.wallet.publicKey,
-      dexterAuthority: provider.wallet.publicKey,
-      systemProgram: SystemProgram.programId,
-    })
-    .rpc();
-  await pollUntilAccountExists(connection, vaultPda);
-
-  const sessionKeypair = Keypair.generate();
-  const sessionPubkey = sessionKeypair.publicKey.toBytes();
-  const allowedCounterparty = Keypair.generate().publicKey;
-  const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-  const nonce = 1;
-
-  const msg = sessionRegisterMessageV2({
-    programId: program.programId,
-    vaultPda,
-    sessionPubkey,
+  const { sessionKeypair } = await registerSessionV2(program, provider, {
+    vaultPda: bootstrap.vaultPda,
+    passkey: bootstrap.passkey,
+    vaultUsdcAta: bootstrap.sourceAta,
+    swigAddress: bootstrap.swigAddress,
+    swigWalletAddress: bootstrap.swigWalletAddress,
     maxAmount,
-    expiresAt,
-    allowedCounterparty,
-    nonce,
     maxRevolvingCapacity,
   });
-  const signed = signOperationWithPasskey(passkey, msg);
-  const precompileIx = buildSecp256r1VerifyInstruction(
-    passkey.publicKey,
-    signed.signature,
-    signed.precompileMessage
-  );
-  const vaultIx = await program.methods
-    .registerSessionKey({
-      sessionPubkey: Array.from(sessionPubkey),
-      maxAmount: new anchor.BN(maxAmount.toString()),
-      expiresAt: new anchor.BN(expiresAt.toString()),
-      allowedCounterparty,
-      nonce,
-      maxRevolvingCapacity: new anchor.BN(maxRevolvingCapacity.toString()),
-      clientDataJson: Buffer.from(signed.clientDataJSON),
-      authenticatorData: Buffer.from(signed.authenticatorData),
-    })
-    .accountsPartial({ vault: vaultPda, instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY })
-    .instruction();
-  await provider.sendAndConfirm(new Transaction().add(precompileIx, vaultIx));
 
-  const swigId = new Uint8Array(32);
-  crypto.getRandomValues(swigId);
-  const swigPdaKit = await findSwigPda(swigId);
-  const swigAddress = new PublicKey(String(swigPdaKit));
-
-  const bootstrapAuthority = createEd25519AuthorityInfo(
-    Uint8Array.from(wallet.publicKey.toBytes())
-  );
-  const bootstrapActions = Actions.set().manageAuthority().get();
-
-  const vaultProgramIdBytes = Uint8Array.from(program.programId.toBytes());
-  const vaultAuthority = createProgramExecAuthorityInfo(
-    vaultProgramIdBytes,
-    SETTLE_TAB_VOUCHER_DISCRIMINATOR
-  );
-  const vaultActions = Actions.set().all().get();
-
-  const createSwigCtx = await getCreateSwigInstruction({
-    payer: kitAddress(wallet.publicKey.toBase58()),
-    id: swigId,
-    actions: bootstrapActions,
-    authorityInfo: bootstrapAuthority,
-  });
-  await provider.sendAndConfirm(
-    new Transaction().add(...kitInstructionsToWeb3([createSwigCtx]))
-  );
-
-  const swigForAdd = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
-  if (!swigForAdd) throw new Error("Swig not visible post-create");
-  const addAuthorityIxs = await getAddAuthorityInstructions(
-    swigForAdd,
-    0,
-    vaultAuthority,
-    vaultActions,
-    { payer: kitAddress(wallet.publicKey.toBase58()) }
-  );
-  await provider.sendAndConfirm(
-    new Transaction().add(...kitInstructionsToWeb3(addAuthorityIxs))
-  );
-
-  const setSwigOp = setSwigMessage(swigAddress);
-  const setSwigSigned = signOperationWithPasskey(passkey, setSwigOp);
-  const setSwigPrecompile = buildSecp256r1VerifyInstruction(
-    passkey.publicKey,
-    setSwigSigned.signature,
-    setSwigSigned.precompileMessage
-  );
-  const setSwigVaultIx = await program.methods
-    .setSwig({
-      swigAddress,
-      clientDataJson: Buffer.from(setSwigSigned.clientDataJSON),
-      authenticatorData: Buffer.from(setSwigSigned.authenticatorData),
-    })
-    .accountsPartial({
-      vault: vaultPda,
-      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-    })
-    .instruction();
-  await provider.sendAndConfirm(
-    new Transaction().add(setSwigPrecompile, setSwigVaultIx)
-  );
-
-  const decimals = 6;
-  const mint = await createMint(connection, wallet, wallet.publicKey, null, decimals);
-  await pollUntilAccountExists(connection, mint);
-
-  const swigForWallet = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
-  if (!swigForWallet) throw new Error("Swig not visible for wallet derivation");
-  const swigWalletAddrKit = await getSwigWalletAddress(swigForWallet);
-  const swigWalletAddress = new PublicKey(String(swigWalletAddrKit));
-
-  const sourceAta = await createAtaIdempotentFinalized(
-    provider,
-    wallet,
-    mint,
-    swigWalletAddress,
-    true
-  );
-  await mintTo(
-    connection,
-    wallet,
-    mint,
-    sourceAta,
-    wallet,
-    usdcFundingAmount
-  );
-  await pollUntilAccount(
-    () => import("@solana/spl-token").then(({ getAccount }) =>
-      getAccount(connection, sourceAta, "finalized")
-    ),
-    (acct: any) => acct.amount >= usdcFundingAmount,
-  );
-
-  const channelId = vaultPda.toBytes();
+  const channelId = bootstrap.vaultPda.toBytes();
 
   return {
-    vaultPda,
-    passkey,
+    vaultPda: bootstrap.vaultPda,
+    passkey: bootstrap.passkey,
     sessionKeypair,
     channelId,
-    swigAddress,
-    swigWalletAddress,
-    mint,
-    sourceAta,
-    decimals,
+    swigAddress: bootstrap.swigAddress,
+    swigWalletAddress: bootstrap.swigWalletAddress,
+    mint: bootstrap.mint,
+    sourceAta: bootstrap.sourceAta,
+    decimals: bootstrap.decimals,
   };
 }
 
