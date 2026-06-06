@@ -3,6 +3,14 @@
 Read this first after a compact. Single source of truth for resuming with zero fidelity loss.
 Written by credex/vault Claude (session continued from `e0a2c1c7`) for Branch.
 
+> **UPDATE 2026-06-06 — PHASE B IS DONE. CREDIT-L2 IS LIVE ON MAINNET.**
+> Deploy sig `228ddxbrBAkdnWFaaWpVbfnxBjgrJRXGLgLn9CJaHRxJ4dt716ETK13dBFfAw65SAYVYkyX6yMSkZpTnfkXmNVaM`
+> (slot 424719691). Program `Hg3wRayd…` now serves **24 instructions**; on-chain bytes verified
+> byte-for-byte identical to the local build (`a17e14d9…719008`, padding-trimmed). Extended +40960
+> bytes (cost ~0.287 SOL permanent); deploy buffer reclaimed (wallet back to ~3.61 SOL). Authority
+> `X4o2kSLz…` unchanged. Purely additive — all 50 existing V4 vaults run untouched; V5 migration opt-in.
+> **NEXT = PHASE C** (Task 9 SDK builders, Task 10 the 9-scenario mainnet test list). NO publish without go.
+
 ═══════════════════════════════════════════════════════════════════════════════════
 ## TL;DR — WHERE WE ARE
 ═══════════════════════════════════════════════════════════════════════════════════
