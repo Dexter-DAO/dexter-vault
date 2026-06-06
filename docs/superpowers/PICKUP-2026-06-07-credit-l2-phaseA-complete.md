@@ -3,13 +3,28 @@
 Read this first after a compact. Single source of truth for resuming with zero fidelity loss.
 Written by credex/vault Claude (session continued from `e0a2c1c7`) for Branch.
 
-> **UPDATE 2026-06-06 — PHASE B IS DONE. CREDIT-L2 IS LIVE ON MAINNET.**
+> **UPDATE 2026-06-06 — PHASE B + C DONE. CREDIT-L2 IS LIVE AND FULLY PROVEN ON MAINNET.**
 > Deploy sig `228ddxbrBAkdnWFaaWpVbfnxBjgrJRXGLgLn9CJaHRxJ4dt716ETK13dBFfAw65SAYVYkyX6yMSkZpTnfkXmNVaM`
-> (slot 424719691). Program `Hg3wRayd…` now serves **24 instructions**; on-chain bytes verified
-> byte-for-byte identical to the local build (`a17e14d9…719008`, padding-trimmed). Extended +40960
-> bytes (cost ~0.287 SOL permanent); deploy buffer reclaimed (wallet back to ~3.61 SOL). Authority
-> `X4o2kSLz…` unchanged. Purely additive — all 50 existing V4 vaults run untouched; V5 migration opt-in.
-> **NEXT = PHASE C** (Task 9 SDK builders, Task 10 the 9-scenario mainnet test list). NO publish without go.
+> (slot 424719691). Program `Hg3wRayd…` serves **24 instructions**; on-chain bytes byte-for-byte ==
+> local build (`a17e14d9…719008`). Authority `X4o2kSLz…` unchanged. Additive — 50 V4 vaults untouched.
+>
+> **PHASE C COMPLETE:**
+> - **Task 9** (SDK builders) ✅ — dexter-vault-sdk commit `ca36af0`: 5 credit builders + discriminators,
+>   103 tests green, NOT published (gated).
+> - **Task 10** (mainnet suite) ✅ — final commit `48b0368`: **ALL 10 scenarios GREEN on mainnet.**
+>   S1 cap guard · S2 draw+repay (money: $3 financier→seller, repay user→financier) · S3 withdraw-below-pin
+>   · S4 seize-too-early · S5 no-consent · S6 consent-replay · S7 wrong-marker draw rejected · S8 V5
+>   withdrawal (proves blocker 90c2429) · S9 migration fidelity · S10 happy seize ($2, sleep past deadline,
+>   user→financier). The 3 first-run reds were all test-harness bugs (separate-mint-per-vault for S2/S10;
+>   S7 regex wording) — program was correct throughout; fixed + re-run green.
+>
+> **THE THESIS IS PROVEN END-TO-END ON MAINNET.** Buyer spends past their balance on a financier's standby
+> capital, non-custodially, repays it, and cannot rug the financier (cap + pin + no-early-seize +
+> deadline-seize all on-chain); credit can't be attached/forged without the user's passkey consent.
+>
+> **NEXT = the Ζ-GATES** (below) before any real external financier onboards. SDK unpublished, nothing
+> pushed — all on `main`, local. Reframed: the buyer-protection invariants DON'T EXIST yet; the system is
+> only safe today because there's no adversarial counterparty (NOT "fine because Branch controls both sides").
 
 ═══════════════════════════════════════════════════════════════════════════════════
 ## TL;DR — WHERE WE ARE
