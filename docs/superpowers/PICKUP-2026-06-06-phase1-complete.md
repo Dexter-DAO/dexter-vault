@@ -158,6 +158,29 @@ three rejections work; Phase 3 wraps them in a demo UI.
    withdrawal-reject left pending_voucher_count>0 → wrong guard fired first. Both fixed; the
    guards proven specifically.)
 
+### DEFERRED NITS (small "we'll do it later" items, verified still-undone 2026-06-06)
+- **[CONFIRMED UNDONE] Tighten the turnover-demo assertion.** `tests/revolving-meter.ts:349` is
+  still `expect(turnover).to.be.greaterThan(1)`. Seam-spec Q-OPEN-3 agreed to tighten it to
+  `>= ROUNDS*CLAIM/REVOLVING` so it proves 5x SPECIFICALLY, not just ">1x". One-liner. Trivial.
+- **[CONFIRMED UNDONE] Dead V1 register-domain constant.** `dexter-vault-sdk/src/constants/index.ts:60`
+  still exports `OTS_SESSION_REGISTER_V1_DOMAIN` — now unused (register path is V2). Flagged as
+  "optional cleanup" in the Thread B final review. CAVEAT before deleting: confirm the REVOKE path
+  doesn't still legitimately use a V1 domain (there's also OTS_SESSION_REVOKE_V1_DOMAIN — different
+  constant, likely still live). 5-second check, then delete the register one.
+- **[NICE-TO-HAVE] `registerSettleableVault` 4x auto-funding footgun.** tests/helpers/settle.ts
+  auto-funds `4 * max(maxAmount, maxRevolvingCapacity)`. This caused a FALSE-PASS trap in the
+  over-cap test (over-funded → guard unreachable → test would've passed for nothing). It's fine as
+  long as everyone knows; consider making funding an explicit required param so the footgun can't
+  recur. (enrollLockableVault already takes exact usdcFundingAmount — use it when you need control.)
+- **[NICE-TO-HAVE / Phase 3] Resume cap-from-chain breadcrumb.** Thread B left a comment in
+  dexter-x402-sdk resumeTab() that a resumed session should READ max_revolving_capacity from chain
+  (don't re-supply), and never persist a session key. Captured in code; surfaces in Phase 3 resume work.
+- **[IN CHECKLIST] Consumer bumps to ^0.4.2** (dexter-facilitator, dexter-x402-sdk) — must happen
+  AFTER the 0.4.2 publish. Already in COMBINED-PHASE-1-DEPLOY-CHECKLIST.md step 7; restated here so it's not lost.
+- **[ABANDONED ON PURPOSE] ~0.65 SOL spent on the program-data `extend` during deploy is gone-but-fine**
+  (it permanently funds the now-larger program-data account — it's not lost, it's rent). The transient
+  deploy buffer reclaimed fully. Branch said forget chasing any SOL back. Net deploy cost was tiny.
+
 ═══════════════════════════════════════════════════════════════════════════════════
 ## ENVIRONMENT / DISCIPLINE (the operational facts that bit us, so they don't again)
 ═══════════════════════════════════════════════════════════════════════════════════
