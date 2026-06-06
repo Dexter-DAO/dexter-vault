@@ -137,4 +137,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::recover_abandoned_lock::handler(ctx, args)
     }
+
+    pub fn open_standby(
+        ctx: Context<OpenStandby>,
+        args: OpenStandbyArgs,
+    ) -> Result<()> {
+        instructions::open_standby::handler(ctx, args)
+    }
 }
