@@ -18,6 +18,10 @@ pub const VAULT_VERSION_V3: u8 = 3;
 /// `SessionRegistration`. Enlarges `Vault::INIT_SPACE`. New vaults init as V4.
 pub const VAULT_VERSION_V4: u8 = 4;
 
+/// V5 appends credit accounting: external-financier standby backing.
+/// `borrowed` is the "buyer is negative" accumulator. New vaults init as V5.
+pub const VAULT_VERSION_V5: u8 = 5;
+
 #[account]
 #[derive(InitSpace)]
 pub struct Vault {
@@ -58,6 +62,20 @@ pub struct Vault {
     pub total_crystallized_amount: u64,
     /// Lifetime monotonic settled-from-claim odometer at vault scope. Never decremented.
     pub total_settled_amount: u64,
+    /// V5: amount an external financier has fronted that the buyer has NOT
+    /// repaid. The credit ("buyer is negative") accumulator. Rises at
+    /// `draw_credit`, falls at `repay_credit` / `seize_collateral`. MUST never
+    /// exceed `standby_cap`.
+    pub borrowed: u64,
+    /// V5: the financier's vault (swig_address) authorized to back this vault
+    /// past the user's own balance. `None` = no credit enabled. Set by
+    /// `open_standby`.
+    pub standby_backer: Option<Pubkey>,
+    /// V5: the ceiling the financier committed. `borrowed <= standby_cap` always.
+    pub standby_cap: u64,
+    /// V5: deadline after which the financier may `seize_collateral`. Set on the
+    /// first draw, cleared when `borrowed` returns to 0. None = nothing borrowed.
+    pub borrow_recovery_at: Option<i64>,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, InitSpace)]
@@ -205,4 +223,14 @@ pub enum VaultError {
     SessionWouldOvercommitVault,
     #[msg("holder_recovery_at must be strictly greater than maturity_at when both are set")]
     RecoveryBeforeMaturity,
+    #[msg("Draw would exceed the financier's committed standby cap.")]
+    CreditWouldExceedStandbyCap,
+    #[msg("Withdrawal would violate the credit pin (borrowed amount is reserved).")]
+    WithdrawalWouldViolatePin,
+    #[msg("Borrow recovery deadline has not passed yet.")]
+    BorrowRecoveryTooEarly,
+    #[msg("No standby backer is configured for this vault.")]
+    NoStandbyBacker,
+    #[msg("Nothing is borrowed on this vault.")]
+    NothingBorrowed,
 }

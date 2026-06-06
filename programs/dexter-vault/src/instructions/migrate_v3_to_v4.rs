@@ -213,6 +213,13 @@ pub fn handler(ctx: Context<MigrateV3ToV4>, _args: MigrateV3ToV4Args) -> Result<
         outstanding_locked_amount: 0,
         total_crystallized_amount: 0,
         total_settled_amount: 0,
+        // V5 credit accounting: this migration emits a V4 vault with no credit
+        // enabled, so the standby fields are neutral (no backer, nothing
+        // borrowed). A separate V4->V5 path will set these when credit is opened.
+        borrowed: 0,
+        standby_backer: None,
+        standby_cap: 0,
+        borrow_recovery_at: None,
     };
 
     // ---- (4) realloc to the V4 size, topping up rent ----------------------
