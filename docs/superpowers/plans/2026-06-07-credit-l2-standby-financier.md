@@ -26,6 +26,7 @@
 
 - **Custody: Option A.** Financier capital stays in the financier's OWN dexter-vault. A draw moves USDC from the financier's vault directly to the seller at clearing time. No pool account, no escrow. Credit is as non-custodial as factoring.
 - **Authorization: standing pre-authorization.** The financier signs the backing policy once (`open_standby` below). The chain enforces bounds on every draw; no per-draw financier signature. This is constitutive — per-draw co-sign would destroy agent-speed credit.
+- **Consent: `open_standby` is TWO-SIGNATURE (v1, mandatory — this is a SECURITY property, not buyer-protection).** Both the user (vault owner, consenting to credit being attached) AND the financier sign the op-message. Financier-only would be a write-to-arbitrary-vault authorization hole (anyone could attach a loan facility to any vault). Distinct from the deferred buyer-protection below: consent answers "can credit be attached to my vault without my signature" (NO, enforced in v1); buyer-protection answers "are the terms fair" (deferred to Ζ). The cheap fix (a second secp256r1-verify leg, a pattern already used everywhere) is built NOW because deferring an authorization hole is exactly how security bugs ship in a demo and become load-bearing.
 - **Pin: soft, slice-only.** Only the borrowed amount (+ a buffer) is pinned, not the whole user balance; the user can repay-to-unlock. Enforced by extending the withdrawal-reservation guard to include `borrowed`.
 - **Liquidation: deadline-seize, mirror of recover_abandoned_lock.** After a deadline, the financier can reclaim the borrowed slice from the user's pinned collateral.
 - **Spread/fee = operator policy** (lives in the consumer, like the withdrawal fee + the factoring spread). Not hardcoded in the program.
@@ -135,18 +136,28 @@ git commit -m "feat(vault): V5 state — credit accounting fields + standby erro
 
 - [ ] **Step 1: Write the instruction**
 
-Create `open_standby.rs`. The financier authorizes backing the USER's vault up to `cap`. Accounts: the user's `vault` (mut), the financier's `financier_swig` (their vault's swig_address, signs via passkey OR a financier authority key — use the same passkey-verify pattern as other authorizing ixs; the financier proves control of their backing vault), `instructions_sysvar`. Args: `cap: u64` + the financier's passkey ceremony bytes (`client_data_json`, `authenticator_data`) signing op-message `"open_standby" || user_vault || financier_swig || cap_le`.
+Create `open_standby.rs`. Establishing a credit relationship requires **BOTH parties to sign** — this is a SECURITY property, not a nicety (see the box below). The financier authorizes backing, AND the user (vault owner) consents to having credit attached to their vault.
+
+**⚠️ TWO-SIGNATURE CONSENT (mandatory in v1 — this is authorization, not buyer-protection):**
+`open_standby` writes `standby_backer`/`standby_cap` onto the USER's vault. If only the financier signed, a financier could attach a credit facility to ANY vault — including one whose owner never opted in. That's a write-to-arbitrary-vault path, an authorization hole, NOT a deferrable fairness concern. So `open_standby` requires **two passkey signatures over the same op-message**: the user's vault passkey (consent) AND the financier proving control of their backing vault. This is the same secp256r1-verify pattern used elsewhere — just two sibling-verify instructions / two signers instead of one. Without the user's signature the instruction MUST reject.
+
+Accounts: the user's `vault` (mut), the user's `swig`/passkey-bearing account (the vault owner consenting), the financier's `financier_swig` (their backing vault's swig_address), `instructions_sysvar`. Args: `cap: u64` + BOTH parties' passkey ceremony bytes (`user_client_data_json`/`user_authenticator_data` AND `financier_client_data_json`/`financier_authenticator_data`), each signing the op-message `"open_standby" || user_vault || financier_swig || cap_le`.
 
 Handler logic:
 ```rust
-// validate the financier passkey signature over "open_standby" || vault || financier_swig || cap
-// set vault.standby_backer = Some(financier_swig.key())
-// set vault.standby_cap = cap
 require!(cap > 0, VaultError::...); // a zero cap is a no-op / disable path could be separate
+// op_message = "open_standby" || user_vault || financier_swig || cap_le
+// 1. validate the USER's vault passkey signature over op_message (CONSENT — the owner opted in)
+//    using vault.passkey_pubkey, the same secp256r1 sibling-instruction pattern as register_session_key
+// 2. validate the FINANCIER's passkey signature over op_message (the financier authorizes backing)
+//    proving control of financier_swig's backing vault
+// BOTH must verify or the instruction rejects.
 vault.standby_backer = Some(ctx.accounts.financier_swig.key());
 vault.standby_cap = cap;
 ```
-(Follow the exact account-struct + secp256r1 sibling-instruction verification pattern from `register_session_key.rs` / `recover_abandoned_lock.rs`. The op-message domain string is new: `"open_standby"`.)
+(Follow the exact account-struct + secp256r1 sibling-instruction verification pattern from `register_session_key.rs` / `recover_abandoned_lock.rs` — but with TWO verify legs. The op-message domain string is new: `"open_standby"`. If two secp256r1 sibling instructions in one tx is awkward, the user-consent leg can be the primary signer and the financier leg the second; the load-bearing requirement is simply: the user's passkey MUST have signed, or the call fails.)
+
+**Test requirement (add to Task 10):** an anti-abuse test proving `open_standby` REJECTS when the user's consent signature is absent/invalid — i.e. a financier cannot attach standby backing to a vault the owner didn't sign for. This is a real failed-tx proof, same rigor as the anti-rug trio.
 
 - [ ] **Step 2: Wire it in mod.rs + lib.rs**
 
@@ -402,6 +413,10 @@ Draw $4 (borrowed=4), then attempt `finalize_withdrawal` that would pull collate
 - [ ] **Step 4: Anti-rug #3 — seize before deadline rejected**
 
 Draw, then attempt `seize_collateral` before `borrow_recovery_at` → expect `BorrowRecoveryTooEarly`. (The financier can't grab early.)
+
+- [ ] **Step 4b: Anti-abuse #4 — open_standby WITHOUT user consent rejected (the authorization gate)**
+
+Attempt `open_standby` against a user vault with ONLY the financier's signature (missing/invalid user consent signature) → expect rejection. This proves a financier CANNOT attach standby backing to a vault whose owner didn't co-sign — the write-to-arbitrary-vault hole is closed. Real failed-tx proof, same rigor as the anti-rug trio. (This is the consent/authorization property, distinct from the deferred buyer-protection.)
 
 - [ ] **Step 5: Lifecycle — borrow → abandon → seize (happy seize)**
 
