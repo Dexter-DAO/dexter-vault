@@ -122,7 +122,11 @@ The ladder of altitudes the deck climbs (memorize this — it's the spine):
 
 ---
 
-## SECOND PEER REVIEW (Clawdexter read llms-full.txt, ~02:11 — DO THESE, my version not his)
+## SECOND PEER REVIEW (Clawdexter read llms-full.txt, ~02:11)
+
+**✅ STATUS: ALL THREE FIXES ARE DONE + SHIPPED THIS SESSION (committed `2bf797e`, live at dexter.cash/vc + /vc/llms-full.txt). Do NOT re-apply them — they're already in the deck slides AND llms-full.txt, built and restarted in production.** What's below is the record of WHY each fix was made (my verdict, not a blind accept of Clawdexter's), kept for context. The three edits made: (1) trimmed §5/§6 stat wall to two forces + a Goldman/Google footnote; (2) rewrote the 5× line to the literal mechanic ("$2 cleared $10 across ~20 txs, mechanism not volume"); (3) Wall-1/§12 — confirmed already balanced (slide 12 is the callback+flip, slide 11 holds full custody weight), no change needed. ALSO done: /vc/llms.txt now re-exports the full brief (elevator version retired — Branch's call).
+
+### The verdict (kept for context — these were DONE, my version not his)
 
 After the deck shipped, Branch sent the agent (Clawdexter) the `llms-full.txt` URL and asked for honest commentary. He gave 4 pushbacks + praise + one "stress-test." **Branch's explicit instruction: go with MY (this agent's) read of them, not a blind acceptance of Clawdexter's. Make the precise fixes below the morning of 2026-06-07.** Ranked by how-right-considering-intent:
 
