@@ -122,6 +122,30 @@ The ladder of altitudes the deck climbs (memorize this — it's the spine):
 
 ---
 
+## SECOND PEER REVIEW (Clawdexter read llms-full.txt, ~02:11 — DO THESE, my version not his)
+
+After the deck shipped, Branch sent the agent (Clawdexter) the `llms-full.txt` URL and asked for honest commentary. He gave 4 pushbacks + praise + one "stress-test." **Branch's explicit instruction: go with MY (this agent's) read of them, not a blind acceptance of Clawdexter's. Make the precise fixes below the morning of 2026-06-07.** Ranked by how-right-considering-intent:
+
+**#2 — the §5/§6 stat wall is the MOST-right and the real improvement (AGREE FULLY).** Five borrowed forecasts back-to-back (Goldman 24× / Google 1000× / Stanford-MIT 700×↓300×↑ / Gartner 40%) reads as *borrowing conviction instead of having it.* **FIX: trim to TWO — the branching-architecture convergence (it's first-principles, ours) + Gartner (the load-bearing one: cost kills agent projects → credit removes the throttle). Goldman/Google drop to ONE footnote line, not three forecast bullets. Let §4 (manufactured demand) carry its own legs.** Cut, don't add.
+
+**#3 — the "5× turnover" line is murky (AGREE — but the fix is CLARITY, NOT his denominator).** Clawdexter said "needs a denominator or it reads as a toy." Branch himself said he doesn't actually know what "cleared 5×" means — which IS the problem: if the founder isn't sure, a partner won't be. **But do NOT add a denominator that implies volume (that's the net-30 sin). FIX: state the literal mechanic in plain words — e.g. "$2 of capacity cleared $10 of payments across ~20 transactions" (the same dollars reused 5×). Clarity fix, honest, no traction implied.** The deck correctly claims *mechanism not volume*; keep that register. Room answer for "5× of what / total volume?": "test-suite/mechanism scale, plainly — the external draw (§15 milestone) is what makes it traction."
+
+**#1 — Wall 1 (custody moat) is over-leaned (AGREE, minor).** NOTE FOR BRANCH (he asked "didn't we already fix this?"): we fixed the *worst* version tonight (cut the false "balance-sheet→custodian" logic). Clawdexter isn't seeing the old error — he's seeing custody-as-moat *repeated 3×* (§2, §11 Wall 1, §12). Different, real, small. **FIX: lean §2 and §12 toward Wall 2 (the loan book); let §11 be the ONLY place custody-conflict gets full weight. ~3 line edits. Custody = timing/disincentive, NOT "a wall they can't climb" (already the deck's framing — just rebalance emphasis).**
+
+**#4 — the $60M cap is NOT a criticism.** Clawdexter PRAISED it ("priced on the proven floor, thesis free"; "skeptic funds floor / believer funds ceiling — the best sentence in §15"). Nothing to do. Bank it.
+
+**His closing "one thing to stress-test"** (agents actually wanting credit vs. owners pre-funding; the external draw is the soft joint) is CORRECT but it's **already our #1 known open item** (the external-counterparty draw), not a new finding. Not a deck fix — it's the milestone, already flagged.
+
+**THE NET (my honest read, no generosity):** Clawdexter found ZERO things wrong/invented. Every pushback is subtraction-for-sharpness ("fixable by subtraction, not addition. Cut, don't add" — his words). Two of his sharpest (Wall-1 over-lean, stat-wall) are things we'd already started fixing tonight = signal we were right. **Three real edits, all SUBTRACT/CLARIFY, none touch the spine:**
+1. Trim §5/§6 stats → two + a footnote.
+2. Rewrite the 5× line to the literal mechanic ("$2 cleared $10 across ~20 txs").
+3. Rebalance §2/§12 toward Wall 2; §11 keeps full custody weight.
+**Apply ALL THREE to BOTH the deck slides (`dexter-fe/app/vc/slides/`) AND `llms-full.txt` so they stay in sync. Then one build + one PM2 restart. Decline the denominator-add; don't let anyone touch §3's mechanism framing.**
+
+(Full Clawdexter review text + Branch's reaction are in this session's transcript if more nuance is needed.)
+
+---
+
 ## RE-ENTRY ONE-LINER
 
 Branch built non-custodial agent credit, live on Solana mainnet, and tonight we re-baselined the whole pitch around it and shipped a new 15-slide deck to `dexter.cash/vc` (+ agent-readable `/vc/llms-full.txt`), forged from the C-Suite thread and the thesis depth docs, spine in `dexter-thesis/SEED-DECK-v5.md`. Content's done and peer-reviewed; Branch does the design pass. Hold the disciplines (credit-is-built, no facilitator-volume, no hard-to-build, cite-others'-numbers, two-wall moat, labs-as-allies, the ladder). Commit to main, push only when asked. He's a slop bloodhound — write tight, have conviction, don't fish.
