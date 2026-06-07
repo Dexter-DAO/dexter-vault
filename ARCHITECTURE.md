@@ -11,7 +11,7 @@ For security properties and threat model, see [`SECURITY.md`](./SECURITY.md). Fo
 
 ## 1. What dexter-vault is
 
-dexter-vault is one Anchor program that defines a single account type (`Vault`) and eight instructions. Its job is to gate withdrawal from a buyer's Swig smart-wallet such that the buyer cannot drain the wallet while spending authorizations ("tabs") are outstanding.
+dexter-vault is one Anchor program that defines a single account type (`Vault`) and nine instructions. Eight gate withdrawal from a buyer's Swig smart-wallet such that the buyer cannot drain the wallet while spending authorizations ("tabs") are outstanding; the ninth, `prove_passkey`, is a read-only proof-of-control primitive used for non-custodial identity (see §1 below and the instruction table).
 
 The program does **not** move funds. The actual movement of USDC from the buyer's Swig wallet happens via the Swig program, signed by a session role that Dexter operates. dexter-vault's job is bookkeeping and gating:
 
@@ -19,7 +19,7 @@ The program does **not** move funds. The actual movement of USDC from the buyer'
 - Track a pending withdrawal intent (`pending_withdrawal`).
 - Enforce that withdrawals only finalize when (count == 0) AND (cooling-off elapsed).
 
-That's it. The program is small, deliberately. It is roughly 550 lines of Rust across eight instructions plus a WebAuthn verification module.
+That's it. The program is small, deliberately. It is roughly 575 lines of Rust across nine instructions plus a WebAuthn verification module. (The ninth instruction, `prove_passkey`, adds no state and no new account — it reuses the existing WebAuthn verification to prove passkey control read-only.)
 
 ---
 
@@ -380,6 +380,38 @@ pub struct RotateDexterAuthorityArgs {
 
 **Effects:**
 - Sets `vault.dexter_authority = args.new_dexter_authority`. Touches only the authority field; never the passkey, the swig, or the counter, and never moves funds.
+
+---
+
+### 4.9 `prove_passkey`
+
+**Purpose:** Prove that the buyer's passkey controls the vault — **read-only**, without moving funds, changing state, or requiring any signer other than the passkey itself. This is the Solana analogue of EIP-1271's `isValidSignature`: it lets an off-chain relying party (a website, an x402 identity-gated endpoint, a gating check) verify vault ownership the same way the spending instructions verify it, but with nothing at stake. It is the non-custodial basis for Sign-In-With-X and any "prove you own this wallet" flow.
+
+**Signature:**
+```rust
+pub fn prove_passkey(
+    ctx: Context<ProvePasskey>,
+    args: ProvePasskeyArgs,
+) -> Result<()>
+
+pub struct ProvePasskeyArgs {
+    pub challenge: [u8; 32],          // the value to prove control over (e.g. a login nonce)
+    pub client_data_json: Vec<u8>,    // WebAuthn clientDataJSON
+    pub authenticator_data: Vec<u8>,  // WebAuthn authenticatorData
+}
+```
+
+**Accounts:**
+- `vault` (**read-only** — not mutable, no signer)
+- `instructions_sysvar` (address-constrained; the SIMD-0075 precompile sibling is verified through it)
+
+**Pre-conditions:**
+- The buyer's passkey signed `"siwx_login" || challenge`, verified on-chain via the secp256r1 precompile sibling instruction (same path as `request_withdrawal` et al.)
+
+**Effects:**
+- **None.** No state is written, no funds move, no account is mutated. The instruction succeeds (`Ok`) iff the passkey assertion is valid for this vault, and errors otherwise.
+
+**How it is used (verification by simulation):** a relying party builds a transaction `[secp256r1_verify_ix, prove_passkey_ix]` and calls `simulateTransaction` with signature verification disabled. The passkey "signs" via the precompile's instruction data, not a transaction signature, so no fee payer or signer is required (a nominal existing fee payer is set on the simulated transaction). A returned `err == null` proves the passkey controlling this vault signed the challenge; the transaction is never submitted. This makes proof-of-control free, instant, and entirely non-custodial.
 
 ---
 

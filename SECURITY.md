@@ -22,6 +22,10 @@ dexter-vault is an Anchor program that gates withdrawal from a buyer's bound Swi
 
 This document is concerned only with what dexter-vault itself enforces. Related security properties enforced by the Swig program are noted but not the primary subject here.
 
+> **Precision note on invariant 3 — "enforced by the Swig program, not by dexter-vault" is on-chain and trustless, not a demotion.** Reviewers (human and automated) repeatedly read that clause as "the spend cap is soft / off-chain." It is not. **Swig is a Solana smart contract, not a Dexter server.** Dexter's session role *physically cannot* sign a transfer exceeding its `tokenLimit` or outliving its TTL — the Swig program rejects the instruction at execution, the same class of guarantee as this program's own withdrawal gate (invariant 1). The `tokenLimit` is the **total on-chain ceiling on everything Dexter's spending side can ever move**, and no Dexter server, facilitator, or off-chain policy is trusted for it. "Not by dexter-vault" means "by a different on-chain program," not "off-chain."
+>
+> Distinct and weaker, so don't conflate them: the **per-voucher `max_amount`** recorded by `register_session_key` is a *finer-grained streaming sub-cap*, and today it is checked off-chain by seller middleware. The `active_session.spent` field exists for a future on-chain consumer to meter against, but the program does not yet increment or check it (`register_session_key.rs:36-37`). This narrows the blast radius *within* the Swig ceiling; even with no seller check at all, `tokenLimit` still hard-caps total spend on-chain. It is a designed-but-unbuilt enforcement path, **not a custody surface** — nothing here lets Dexter exceed what the buyer's passkey authorized.
+
 ---
 
 ## 2. Trust assumptions

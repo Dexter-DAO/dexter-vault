@@ -8,3 +8,8 @@ test-ledger
 .deploy-backup/
 .env
 .env.*
+
+# Local-only — not source (added 2026-06-07 cleanup)
+.claude/
+*.pdf
+.deploy-resume.txt
