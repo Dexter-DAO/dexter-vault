@@ -141,6 +141,14 @@ A program SHOULD also provide rotation for both authorities so a vault is never 
 | `rotate_passkey` | Buyer's current passkey | Rotate the root passkey; the current passkey signs the new one |
 | `rotate_<authority>` | Current facilitator authority | Rotate the facilitator authority; the current authority signs the new one |
 
+A program MAY additionally provide a read-only proof-of-control instruction, so that a relying party can verify the buyer controls the vault without any funds moving — the identity complement to the spending instructions above:
+
+| Instruction | Required authority | Effect |
+|---|---|---|
+| `prove_passkey` | Buyer's passkey | Verify the passkey signed a challenge; mutate nothing. No funds, no state, no signer. Succeeds iff the assertion is valid for the vault |
+
+This is the on-chain primitive for non-custodial identity (Sign-In-With-X, gated access, proof of wallet ownership) — the Solana analogue of EIP-1271's `isValidSignature`. Because it changes no state and requires no signer, a relying party verifies control by **simulation**: build `[secp256r1_verify_ix, prove_passkey_ix]` over the challenge and call `simulateTransaction` with signature verification disabled; the passkey signs via the precompile's instruction data, not a transaction signature, so no fee payer is spent and nothing is submitted on chain. A returned error of `null` proves the passkey controlling the vault signed the challenge. The reference implementation exposes this as the `prove_passkey` instruction (see §3.7); it is OPTIONAL in OTS v1.0 because it is not required for the core spending/seller-protection guarantees, but RECOMMENDED for any deployment that also needs identity.
+
 The vault account MUST contain at minimum:
 
 - `passkey_pubkey: [u8; 33]`: secp256r1 compressed pubkey, the root withdrawal authority
@@ -215,6 +223,16 @@ Sellers verify vouchers locally (microsecond latency, no chain calls). At tab cl
 **Mechanism:** `verify/webauthn.rs` reconstructs the signed digest as `sha256(authenticatorData || sha256(clientDataJSON))`, parses the `clientDataJSON` to extract the challenge, and verifies that the challenge equals `sha256(operation_message)`. The signature itself is verified by the `Secp256r1SigVerify1111111111111111111111111` precompile.
 
 **Verification:** Subject to external audit (pending). Pre-audit self-review tracked in `Dexter-DAO/dexter-vault#1`.
+
+### 3.7 Proof-of-control is non-custodial and read-only
+
+**Claim:** A relying party can verify the buyer controls the vault — for sign-in, gated access, or any identity assertion — without any party holding a key on the buyer's behalf, and without any funds, state, or transaction.
+
+**Mechanism:** The optional `prove_passkey` instruction verifies the buyer's passkey signed a challenge (`"siwx_login" || challenge`) via the same secp256r1-precompile path as the spending instructions (§3.6), and mutates nothing. A verifier builds `[secp256r1_verify_ix, prove_passkey_ix]` and calls `simulateTransaction` with signature verification disabled. The passkey's authority is carried in the precompile's instruction data, not in a transaction signature, so no signer and no fee payer are required (a nominal existing account is named as fee payer for the simulated transaction only). An error result of `null` proves the passkey controlling the vault signed the challenge. Nothing is submitted to the chain. The proof is therefore free, instant, and cannot move funds even in principle — the instruction has no writable accounts.
+
+Because the buyer's own hardware passkey produces the proof, verified by public on-chain code, identity is established with the same trust model as spending: trust the program, not a custodian. No facilitator or third party can impersonate the buyer, because none holds a key that satisfies the precompile check for the vault's bound passkey.
+
+**Verification:** The precompile executes during `simulateTransaction` (verified on Solana mainnet). The end-to-end instruction behavior — a valid passkey over the correct challenge accepted; a foreign passkey rejected; a mismatched challenge rejected — is covered by `tests/prove-passkey.ts` in the reference implementation.
 
 ---
 

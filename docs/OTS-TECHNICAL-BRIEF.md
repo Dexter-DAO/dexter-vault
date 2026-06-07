@@ -26,7 +26,7 @@ This inverts the standard escrow model. Instead of locking the *funds*, the prog
 
 ## State machine
 
-The vault program (`programs/dexter-vault/src/`) exposes eight instructions over a single account type. The Vault PDA holds these state fields:
+The vault program (`programs/dexter-vault/src/`) exposes nine instructions over a single account type — eight for spending, recovery, and key rotation, plus `prove_passkey`, a read-only proof-of-control primitive for non-custodial identity. The Vault PDA holds these state fields:
 
 ```rust
 pub struct Vault {
@@ -137,7 +137,7 @@ As noted above, OTS requires a Tab-shaped wallet. Users with existing external w
 
 The vault program has not been externally audited. Funding to commission an audit is in flight as of this writing.
 
-Self-review checklist in `Dexter-DAO/dexter-vault#1` (WebAuthn verification) and `Dexter-DAO/dexter-vault#2` (replay/nonce, saturating math) tracks pre-audit work. Code is reviewable today; the program is small (~550 lines across eight instructions plus WebAuthn verification helpers).
+Self-review checklist in `Dexter-DAO/dexter-vault#1` (WebAuthn verification) and `Dexter-DAO/dexter-vault#2` (replay/nonce, saturating math) tracks pre-audit work. Code is reviewable today; the program is small (~575 lines across nine instructions plus WebAuthn verification helpers).
 
 ---
 
