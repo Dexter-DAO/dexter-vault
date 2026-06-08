@@ -290,4 +290,6 @@ pub enum VaultError {
     NoStandbyBackerLedger,
     #[msg("A different financier already backs this vault; close the existing standby first.")]
     StandbyBackerMismatch,
+    #[msg("financier consent missing: set_standby_reserve / close_standby (financier) must run as the inner CPI of the financier's swig SignV2 (swig_wallet must sign)")]
+    FinancierConsentMissing,
 }
