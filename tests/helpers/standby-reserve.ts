@@ -1,38 +1,43 @@
 // Phase 1 aggregate-reserve test HELPERS — mainnet.
 //
-// Companion to credit.ts. These build the two-sibling consent transactions for
+// Companion to credit.ts. These build the MECHANISM-B consent transactions for
 // the financier-facing standby-reserve instructions plus the dual-leg
 // close_standby:
 //   - set_standby_reserve  — financier raises/sets committed_reserve. NO money
-//       moves; consent = paired [N+1] swig::SignV2 (zero-transfer) whose
-//       ProgramExec marker is the set_standby_reserve discriminator on the
-//       FINANCIER's swig.
+//       moves; consent = the vault ix executed as the INNER CPI of the
+//       FINANCIER swig's SignV2, with the financier_swig_wallet PDA signing it.
 //   - close_standby        — release the standby. EITHER party:
 //       * USER leg:      [N-1] secp256r1 precompile, [N] close_standby{User}
-//       * FINANCIER leg: [N] close_standby{Financier}, [N+1] swig::SignV2(zero)
+//       * FINANCIER leg: close_standby{Financier} as the INNER CPI of the
+//                        financier swig's SignV2 (swig_wallet signs).
 //
-// THE ZERO-TRANSFER PATTERN (highest-judgment piece): set_standby_reserve and
-// the close_standby financier leg move NO money. The SignV2 is consent-only —
-// its ProgramExec authority authenticates against the PRECEDING vault ix
-// (program_id + discriminator marker + accounts[0]=swig / [1]=swig_wallet),
-// IGNORING the inner instruction payload. So we pass an EMPTY array `[]` as the
-// SignV2's instruction list. The Swig SDK serializes an empty Vec<Instruction>
-// to a 1-byte [0x00] payload, which Swig ACCEPTS (a literally-0-length payload
-// would be rejected as MissingInstructions, but the SDK never emits that from
-// `[]`). The empty payload does NOT weaken the consent proof.
+// MECHANISM B — INNER-CPI CONSENT (the highest-judgment piece, replacing the
+// old "two-sibling / ProgramExec marker / zero-transfer empty-[]" pattern that
+// was the vacuous-consent bug). The rust now REQUIRES the financier's
+// swig_wallet PDA to be a SIGNER on set_standby_reserve / close_standby{financier}.
+// The ONLY way to produce that signature is to make the vault ix the INNER
+// instruction of the financier swig's swig::SignV2 — Swig invoke_signed's the
+// swig_wallet PDA over its inner CPIs. So:
+//   1. Build the vault ix with `financier_swig_wallet_address` flagged isSigner.
+//      (set_standby_reserve: the rust struct types it `Signer`, so Anchor emits
+//       isSigner:true automatically. close_standby: the struct types it
+//       `AccountInfo` (the user leg shares the struct), so we patch the meta to
+//       isSigner:true by hand.)
+//   2. Pass that vault ix as the INNER payload to getSignInstructions, routed
+//      through a role on the financier swig that holds a `Program(dexter_vault)`
+//      permission. Swig's SignV2 gate authorizes the inner CPI under that
+//      permission and invoke_signed's the swig_wallet — satisfying the Signer.
 //
-// MARKER REGISTRATION: both financier-leg SignV2s authenticate via a ProgramExec
-// marker on the FINANCIER's swig. enrollCreditVault only sets the bootstrap
-// marker (role 1, default DRAW_CREDIT_DISCRIMINATOR). The set_standby_reserve
-// and close_standby markers are ADDITIONAL — register them post-enrollment with
-// registerMarkerOnSwig (re-exported below for one-import ergonomics) and pass
-// the returned role index into the tx builders' `markerRole` param. Do NOT
+// PROGRAM-AUTHORITY REGISTRATION: the financier-leg SignV2s authenticate via a
+// role carrying a `Program(dexter_vault)` action on the FINANCIER's swig.
+// enrollCreditVault only sets the bootstrap draw_credit marker (role 1). Register
+// the Program authority post-enrollment with registerProgramAuthorityOnSwig and
+// pass the returned role index into the tx builders' `programRole` param. Do NOT
 // hardcode a role.
 //
 // Setup flow the Task 6-9 tests run with these helpers:
-//   const fin = await enrollCreditVault(...);                 // role 1 = draw marker
-//   const setRole   = await registerMarkerOnSwig({ ..., discriminator: SET_STANDBY_RESERVE_DISCRIMINATOR }); // role 2
-//   const closeRole = await registerMarkerOnSwig({ ..., discriminator: CLOSE_STANDBY_DISCRIMINATOR });       // role 3
+//   const fin = await enrollCreditVault(...);                       // role 1 = draw marker
+//   const programRole = await registerProgramAuthorityOnSwig({...}); // role 2
 
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
@@ -51,26 +56,13 @@ import {
   signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
 } from "./secp256r1";
-import { fetchSwig, getSignInstructions } from "@swig-wallet/kit";
+import {
+  fetchSwig,
+  getSignInstructions,
+  getAddAuthorityInstructions,
+} from "@swig-wallet/kit";
+import { Actions, createEd25519AuthorityInfo } from "@swig-wallet/lib";
 import { address as kitAddress, createSolanaRpc } from "@solana/kit";
-import { createHash } from "crypto";
-
-// Re-export registerMarkerOnSwig so the standby tests need only ONE import to
-// place the set_standby_reserve / close_standby markers on the financier swig.
-export { registerMarkerOnSwig } from "./credit";
-
-// ── Anchor discriminators ────────────────────────────────────────────────────
-// Derived at MODULE LOAD via sha256("global:<name>")[..8] so they're provably
-// correct (self-verifying). Cross-checked against target/idl/dexter_vault.json:
-//   set_standby_reserve -> [198, 227, 172, 10, 133, 119, 213, 7]
-//   close_standby       -> [218,  35,  75, 51,  72, 244,  20, 108]
-// Both methods produce identical bytes (verified before commit).
-export const SET_STANDBY_RESERVE_DISCRIMINATOR: Uint8Array = Uint8Array.from(
-  createHash("sha256").update("global:set_standby_reserve").digest().subarray(0, 8),
-);
-export const CLOSE_STANDBY_DISCRIMINATOR: Uint8Array = Uint8Array.from(
-  createHash("sha256").update("global:close_standby").digest().subarray(0, 8),
-);
 
 // ── (1) StandbyBacker PDA ────────────────────────────────────────────────────
 // The program's declared id (the IDL "address" field; equals program.programId).
@@ -108,23 +100,98 @@ export function buildCloseStandbyMessage(
   return buf;
 }
 
-// ── Shared zero-transfer SignV2 tail ─────────────────────────────────────────
-// Both financier-leg builders (set_standby_reserve and the close_standby
-// financier leg) move NO money — their SignV2 is consent-only. This helper
-// single-sources that shared tail: fetch the financier swig, pair the SignV2
-// with the preceding vault ix via preInstructions, and send under a 600k-CU cap.
+// ── registerProgramAuthorityOnSwig ───────────────────────────────────────────
+// Add a NEW role to the financier swig carrying a `Program(dexter_vault)`
+// permission, and return its role index. Mirrors credit.ts::registerMarkerOnSwig
+// (fetch / role-count / getAddAuthorityInstructions / send), but the new
+// authority is an ED25519 authority bound to the provider wallet (NOT a keyless
+// ProgramExec marker), and the action is `Actions.set().programLimit({programId})`
+// (NOT createProgramExecAuthorityInfo + all()).
 //
-// THE EMPTY `[]`: we pass an EMPTY instruction array to getSignInstructions. The
-// Swig SDK serializes an empty Vec<Instruction> to a 1-byte [0x00] payload, which
-// Swig ACCEPTS (a literally-0-length payload would be rejected as
-// MissingInstructions, but the SDK never emits that from `[]`). The ProgramExec
-// authority then authenticates against the PRECEDING vault ix (program_id +
-// discriminator marker + accounts[0]=swig / [1]=swig_wallet), IGNORING the inner
-// payload. The empty payload does NOT weaken the consent proof.
-async function sendZeroTransferSignV2(
+// AUTHORITY WIRING (highest-judgment piece — why an ed25519 authority on the
+// provider wallet, carrying programLimit):
+//   - The financier-leg SignV2 is now a REAL signed CPI, not a marker check.
+//     getSignInstructions(swig, programRole, [vaultIx], false, {payer}) builds a
+//     SignV2 that authenticates via the authority ON programRole. A ProgramExec
+//     marker authority has no key — it can't authenticate a real SignV2 that
+//     carries an arbitrary inner CPI; it only validates a discriminator marker
+//     against a sibling ix (the old, now-removed pattern). So the Program role
+//     MUST be a keyed authority that actually signs.
+//   - The bootstrap (register-bootstrap.ts) makes role 0 an ED25519 authority
+//     bound to `wallet.publicKey` (the provider wallet) with manageAuthority.
+//     That same wallet is the tx fee-payer and signs every test tx. So an
+//     ED25519 authority bound to `wallet.publicKey` is authenticated for free by
+//     the wallet's existing tx signature — no extra Keypair to inject.
+//   - We therefore add a SECOND ed25519 authority, also bound to
+//     `wallet.publicKey`, whose action is `programLimit({ programId: vault })`.
+//     This is exactly the rust `Program` action the SignV2 gate checks for the
+//     inner vault CPI. (NOT programAll — too broad; NOT programScope* — those are
+//     spend-limited token scopes, wrong primitive.)
+//   - role 0 (manageAuthority) signs the ADD, as in registerMarkerOnSwig. The
+//     new role index = count of authorities before the add (roles append).
+export async function registerProgramAuthorityOnSwig(args: {
+  provider: anchor.AnchorProvider;
+  swigAddress: PublicKey;
+  vaultProgramId: PublicKey;
+}): Promise<number> {
+  const { provider, swigAddress, vaultProgramId } = args;
+  const wallet = (provider.wallet as anchor.Wallet).payer;
+  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+
+  const swigForAdd = await fetchSwig(
+    rpc as any,
+    kitAddress(swigAddress.toBase58()),
+  );
+  if (!swigForAdd) throw new Error("Swig not visible for program-authority add");
+
+  // The new role index is the count of authorities present before this add.
+  const rolesBefore: any[] =
+    (swigForAdd as any).roles ?? (swigForAdd as any).authorities ?? [];
+  const newRoleIndex = rolesBefore.length;
+
+  // ED25519 authority bound to the provider wallet (same key as bootstrap role 0).
+  // Authenticated by the wallet's tx signature — no separate signer needed.
+  const programAuthority = createEd25519AuthorityInfo(
+    Uint8Array.from(wallet.publicKey.toBytes()),
+  );
+  // The Program(dexter_vault) action — exactly the rust `Program` gate the SignV2
+  // checks for the inner vault CPI.
+  const programActions = Actions.set()
+    .programLimit({ programId: kitAddress(vaultProgramId.toBase58()) })
+    .get();
+
+  const addAuthorityIxs = await getAddAuthorityInstructions(
+    swigForAdd,
+    0,
+    programAuthority,
+    programActions,
+    { payer: kitAddress(wallet.publicKey.toBase58()) },
+  );
+  await provider.sendAndConfirm(
+    new Transaction().add(...kitInstructionsToWeb3(addAuthorityIxs)),
+  );
+
+  return newRoleIndex;
+}
+
+// ── Shared inner-CPI SignV2 tail ─────────────────────────────────────────────
+// Both financier-leg builders (set_standby_reserve and the close_standby
+// financier leg) route their vault ix as the INNER CPI of the financier swig's
+// SignV2. This helper single-sources that shared tail: fetch the financier swig,
+// build the SignV2 with the vault ix as the inner payload through the Program
+// role, and send under a 600k-CU cap.
+//
+// MECHANISM B: the vault ix is passed as the INNER instruction list — `[vaultIx]`,
+// NOT preInstructions, NOT empty `[]`. Swig's SignV2 authorizes that inner CPI
+// under the role's Program(dexter_vault) permission and invoke_signed's the
+// swig_wallet PDA over it, producing the swig_wallet signature the rust now
+// requires. The caller is responsible for flagging financier_swig_wallet_address
+// isSigner on the vault ix (automatic for set_standby_reserve via the rust Signer
+// type; a manual meta patch for close_standby).
+async function sendVaultCpiSignV2(
   provider: anchor.AnchorProvider,
   financierSwig: PublicKey,
-  markerRole: number,
+  programRole: number,
   vaultIx: TransactionInstruction,
 ): Promise<void> {
   const wallet = (provider.wallet as anchor.Wallet).payer;
@@ -138,13 +205,10 @@ async function sendZeroTransferSignV2(
 
   const signKitIxs = await getSignInstructions(
     swigForSign,
-    markerRole,
-    [],
+    programRole,
+    [vaultIx as any], // ← inner CPI = the vault ix (NOT preInstructions, NOT empty [])
     false,
-    {
-      payer: kitAddress(wallet.publicKey.toBase58()),
-      preInstructions: [vaultIx as any],
-    },
+    { payer: kitAddress(wallet.publicKey.toBase58()) },
   );
   const signWeb3Ixs: TransactionInstruction[] = kitInstructionsToWeb3(signKitIxs);
 
@@ -155,14 +219,13 @@ async function sendZeroTransferSignV2(
   await provider.sendAndConfirm(tx);
 }
 
-// ── (3) set_standby_reserve two-sibling tx ───────────────────────────────────
-// [N]   vault::set_standby_reserve(newReserve)  — financier_swig@0, wallet@1
-// [N+1] swig::SignV2(<zero-transfer>)           — ProgramExec marker on financier swig
-//
-// The vault ix goes in preInstructions so getSignInstructions returns BOTH it
-// and the SignV2 in one ordered array. The instruction list is EMPTY (`[]`) —
-// zero-transfer consent. markerRole is the role returned by registerMarkerOnSwig
-// for SET_STANDBY_RESERVE_DISCRIMINATOR (do NOT hardcode).
+// ── (3) set_standby_reserve via inner-CPI SignV2 ─────────────────────────────
+// The vault ix is the INNER CPI of the financier swig's SignV2 (Program role).
+// The rust struct types financier_swig_wallet_address as `Signer`, so Anchor's
+// .instruction() emits isSigner:true for it automatically — NO manual patch. The
+// rust also REMOVED instructions_sysvar from this instruction's accounts, so it
+// is NOT in accountsPartial. programRole is the role returned by
+// registerProgramAuthorityOnSwig (do NOT hardcode).
 export async function buildSetStandbyReserveTx(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
@@ -170,14 +233,17 @@ export async function buildSetStandbyReserveTx(
     financierSwig: PublicKey;
     financierSwigWalletAddress: PublicKey;
     newReserve: bigint;
-    markerRole: number;
+    programRole: number;
   },
 ): Promise<void> {
-  const { financierSwig, financierSwigWalletAddress, newReserve, markerRole } =
+  const { financierSwig, financierSwigWalletAddress, newReserve, programRole } =
     args;
 
   const [standbyBacker] = deriveStandbyBackerPda(financierSwig);
 
+  // Accounts: financier_swig, financier_swig_wallet_address (Signer — Anchor
+  // auto-emits isSigner:true), standby_backer, fee_payer, system_program.
+  // NO instructions_sysvar (the rust removed it from set_standby_reserve).
   const setStandbyReserveVaultIx = await program.methods
     .setStandbyReserve({ newReserve: new anchor.BN(newReserve.toString()) })
     .accountsPartial({
@@ -185,28 +251,32 @@ export async function buildSetStandbyReserveTx(
       financierSwigWalletAddress,
       standbyBacker,
       feePayer: provider.wallet.publicKey,
-      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       systemProgram: SystemProgram.programId,
     })
     .instruction();
 
-  // Zero-transfer consent: pair the vault ix with an empty-`[]` SignV2. See
-  // sendZeroTransferSignV2 for the full rationale.
-  await sendZeroTransferSignV2(
+  // Mechanism B: vault ix as the inner CPI of the financier swig's SignV2.
+  await sendVaultCpiSignV2(
     provider,
     financierSwig,
-    markerRole,
+    programRole,
     setStandbyReserveVaultIx,
   );
 }
 
 // ── (4) close_standby — both consent legs ────────────────────────────────────
 // closer:"user"     → [N-1] secp256r1 precompile, [N] close_standby{user}
-// closer:"financier"→ [N] close_standby{financier}, [N+1] swig::SignV2(zero)
+// closer:"financier"→ close_standby{financier} as the INNER CPI of the financier
+//                     swig's SignV2 (Program role; swig_wallet signs).
 //
 // Anchor encodes the Closer enum as { user: {} } / { financier: {} }. The
 // financier leg passes empty buffers for clientDataJson/authenticatorData (the
-// rust handler ignores them). markerRole is required for the financier leg only.
+// rust handler ignores them). programRole is required for the financier leg only.
+//
+// close_standby KEEPS instructions_sysvar (the user leg's passkey verifier reads
+// it), and the rust struct types financier_swig_wallet_address as `AccountInfo`
+// (the user leg shares the struct), so for the financier leg we MUST manually
+// patch that account's meta to isSigner:true before routing it through SignV2.
 export async function buildCloseStandbyTx(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
@@ -218,7 +288,7 @@ export async function buildCloseStandbyTx(
     // user leg:
     userPasskey?: P256Keypair;
     // financier leg:
-    markerRole?: number;
+    programRole?: number;
   },
 ): Promise<void> {
   const {
@@ -227,7 +297,7 @@ export async function buildCloseStandbyTx(
     financierSwig,
     financierSwigWalletAddress,
     userPasskey,
-    markerRole,
+    programRole,
   } = args;
 
   const [standbyBacker] = deriveStandbyBackerPda(financierSwig);
@@ -269,9 +339,10 @@ export async function buildCloseStandbyTx(
   }
 
   // ── financier leg ──────────────────────────────────────────────────────────
-  if (markerRole === undefined)
-    throw new Error("close_standby financier leg requires markerRole");
+  if (programRole === undefined)
+    throw new Error("close_standby financier leg requires programRole");
 
+  // KEEPS instructions_sysvar (the struct still has it — the user leg needs it).
   const closeVaultIx = await program.methods
     .closeStandby({
       closer: { financier: {} },
@@ -287,12 +358,18 @@ export async function buildCloseStandbyTx(
     })
     .instruction();
 
-  // Same zero-transfer SignV2 pattern as set_standby_reserve: empty `[]`. See
-  // sendZeroTransferSignV2 for the full rationale.
-  await sendZeroTransferSignV2(
-    provider,
-    financierSwig,
-    markerRole,
-    closeVaultIx,
+  // The struct types financier_swig_wallet_address as AccountInfo (user leg
+  // shares it), so Anchor emits isSigner:false. Mechanism B needs the swig_wallet
+  // to sign the inner CPI, so patch the meta to isSigner:true — compactInstructions
+  // then carries that flag to the outer flattened accounts and Swig invoke_signed's
+  // the PDA at runtime.
+  const walletMeta = closeVaultIx.keys.find((k) =>
+    k.pubkey.equals(financierSwigWalletAddress),
   );
+  if (!walletMeta)
+    throw new Error("financier_swig_wallet_address not in close ix keys");
+  walletMeta.isSigner = true;
+
+  // Mechanism B: vault ix as the inner CPI of the financier swig's SignV2.
+  await sendVaultCpiSignV2(provider, financierSwig, programRole, closeVaultIx);
 }
