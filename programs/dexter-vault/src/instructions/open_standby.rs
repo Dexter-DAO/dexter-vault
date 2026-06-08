@@ -45,6 +45,15 @@ pub struct OpenStandby<'info> {
     /// + their wallet-level co-signing of the transaction (see module docs).
     pub financier_swig: AccountInfo<'info>,
 
+    /// The financier's reserve ledger — must exist (set via set_standby_reserve)
+    /// and match financier_swig. Mutated (aggregate_promised updated).
+    #[account(
+        mut,
+        seeds = [STANDBY_BACKER_SEED, financier_swig.key().as_ref()],
+        bump = standby_backer.bump,
+    )]
+    pub standby_backer: Account<'info, StandbyBacker>,
+
     /// CHECK: instructions sysvar — address-constrained. The previous
     /// instruction in the transaction MUST be a secp256r1_verify call carrying
     /// the USER's passkey signature over the op-message.
@@ -93,6 +102,61 @@ pub fn handler(ctx: Context<OpenStandby>, args: OpenStandbyArgs) -> Result<()> {
         &op_msg,
     )?;
 
+    // Block backer-change: a DIFFERENT financier may not overwrite an existing
+    // standby — the existing one must close_standby first. After this, only two
+    // cases remain: fresh open (None) or same-financier resize.
+    if let Some(existing) = ctx.accounts.vault.standby_backer {
+        require!(
+            existing == ctx.accounts.financier_swig.key(),
+            VaultError::StandbyBackerMismatch
+        );
+    }
+
+    // The financier's ledger must match the financier_swig backing this vault.
+    require!(
+        ctx.accounts.standby_backer.financier_swig == ctx.accounts.financier_swig.key(),
+        VaultError::NoStandbyBackerLedger
+    );
+
+    // Resize-below-borrowed guard: cannot promise less than is already drawn.
+    require!(
+        args.cap >= ctx.accounts.vault.borrowed,
+        VaultError::ResizeBelowBorrowed
+    );
+
+    // Update aggregate_promised by the DELTA (open_standby REPLACES standby_cap,
+    // never accumulates). TWO explicit branches — no signed delta (u64).
+    let old_cap = if ctx.accounts.vault.standby_backer.is_some() {
+        ctx.accounts.vault.standby_cap
+    } else {
+        0
+    };
+    let new_cap = args.cap;
+    if new_cap >= old_cap {
+        // fresh open (old_cap == 0 -> add new_cap) OR resize-up (add the increase).
+        let increase = new_cap - old_cap; // safe: new_cap >= old_cap
+        let new_aggregate = ctx
+            .accounts
+            .standby_backer
+            .aggregate_promised
+            .checked_add(increase)
+            .ok_or(VaultError::StandbyWouldExceedReserve)?;
+        require!(
+            new_aggregate <= ctx.accounts.standby_backer.committed_reserve,
+            VaultError::StandbyWouldExceedReserve
+        );
+        ctx.accounts.standby_backer.aggregate_promised = new_aggregate;
+    } else {
+        // resize-down: aggregate falls; no ceiling check needed.
+        let decrease = old_cap - new_cap; // safe: old_cap > new_cap
+        ctx.accounts.standby_backer.aggregate_promised = ctx
+            .accounts
+            .standby_backer
+            .aggregate_promised
+            .saturating_sub(decrease);
+    }
+
+    // Existing writes (unchanged behavior).
     let vault = &mut ctx.accounts.vault;
     vault.standby_backer = Some(ctx.accounts.financier_swig.key());
     vault.standby_cap = args.cap;
