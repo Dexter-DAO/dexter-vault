@@ -56,6 +56,7 @@ import {
   signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
   sendAddAuthorityResilient,
+  sendPrecompilePairResilient,
 } from "./secp256r1";
 import {
   fetchSwig,
@@ -402,8 +403,20 @@ export async function buildCloseStandbyTx(
       })
       .instruction();
 
-    await provider.sendAndConfirm(
-      new Transaction().add(precompileIx, closeIx),
+    // [precompile, close_standby{user}] pair — resilient send + poll the RESULT
+    // (a successful close clears vault.standby_backer to None). On a transient
+    // drop the poll confirms whether the first send landed (a blind resubmit
+    // would revert on the already-closed state, e.g. StandbyBackerMismatch /
+    // StandbyNotFound); a real revert on the FIRST send (e.g. StandbyStillBorrowed
+    // on the borrowed>0 negative path) propagates immediately. Precompile order
+    // preserved (immediately before the vault ix). Purely additive.
+    await sendPrecompilePairResilient(
+      provider,
+      [precompileIx, closeIx],
+      async () => {
+        const v: any = await program.account.vault.fetch(vaultPda);
+        return v.standbyBacker === null;
+      },
     );
     return;
   }

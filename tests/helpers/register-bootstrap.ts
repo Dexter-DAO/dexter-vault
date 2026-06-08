@@ -25,7 +25,6 @@ import {
   PublicKey,
   SystemProgram,
   SYSVAR_INSTRUCTIONS_PUBKEY,
-  Transaction,
   TransactionInstruction,
 } from "@solana/web3.js";
 import {
@@ -57,6 +56,9 @@ import {
   pollUntilAccount,
   createAtaIdempotentFinalized,
   sendAddAuthorityResilient,
+  sendAndConfirmWithRetry,
+  sendPrecompilePairResilient,
+  sendCreateSwigResilient,
 } from "./secp256r1";
 
 // settle_tab_voucher's Anchor discriminator — the 8-byte instruction-data
@@ -188,7 +190,12 @@ export async function bootstrapForRegister(
     program.programId,
   );
 
-  await program.methods
+  // initialize_vault is idempotent against a transient drop (a re-send of a
+  // never-included init lands identically; a re-send of an already-landed init
+  // reverts cleanly and the trailing pollUntilAccountExists is the source of
+  // truth either way). Build the ix and route through sendAndConfirmWithRetry so
+  // a dropped send self-heals with a fresh blockhash; KEEP the existing poll.
+  const initVaultIx = await program.methods
     .initializeVault({
       passkeyPubkey: Array.from(passkey.publicKey),
       coolingOffSeconds: 0,
@@ -200,7 +207,8 @@ export async function bootstrapForRegister(
       dexterAuthority: provider.wallet.publicKey,
       systemProgram: SystemProgram.programId,
     })
-    .rpc();
+    .instruction();
+  await sendAndConfirmWithRetry(provider, [initVaultIx]);
   await pollUntilAccountExists(connection, vaultPda);
 
   // ── Real Swig: role 0 bootstrap (manageAuthority) + role 1 ProgramExec
@@ -229,8 +237,14 @@ export async function bootstrapForRegister(
     actions: bootstrapActions,
     authorityInfo: bootstrapAuthority,
   });
-  await provider.sendAndConfirm(
-    new Transaction().add(...kitInstructionsToWeb3([createSwigCtx])),
+  // swig CREATE is non-idempotent (fixed swigId): a blind resubmit of a
+  // dropped-but-landed create would revert "already in use". Use check-then-skip
+  // — on a transient drop, poll getAccountInfo for the swig address; resend only
+  // if it truly never landed. Happy path = the original single-shot send.
+  await sendCreateSwigResilient(
+    provider,
+    kitInstructionsToWeb3([createSwigCtx]),
+    swigAddress,
   );
 
   const swigForAdd = await fetchSwig(
@@ -280,8 +294,18 @@ export async function bootstrapForRegister(
       instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
     })
     .instruction();
-  await provider.sendAndConfirm(
-    new Transaction().add(setSwigPrecompile, setSwigVaultIx),
+  // [precompile, set_swig] pair — resilient send + poll the RESULT (vault's
+  // swig_address now equals the bound swig). On a transient drop the poll
+  // confirms whether the first send landed; a real revert on the first send
+  // propagates. Precompile order preserved (precompile immediately before the
+  // vault ix). Purely additive: happy path identical to the original send.
+  await sendPrecompilePairResilient(
+    provider,
+    [setSwigPrecompile, setSwigVaultIx],
+    async () => {
+      const v: any = await program.account.vault.fetch(vaultPda);
+      return v.swigAddress.equals(swigAddress);
+    },
   );
 
   // ── Mint + funded swig-wallet ATA. ────────────────────────────────────────
@@ -413,7 +437,27 @@ export async function registerSessionV2(
       instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
     })
     .instruction();
-  const tx = new Transaction().add(precompileIx, vaultIx);
-  const signature = await provider.sendAndConfirm(tx);
+  // [precompile, register_session_key] pair — resilient send + poll the RESULT
+  // (vault.activeSession now bound to this session pubkey). On a transient drop
+  // the poll confirms whether the first send landed (a blind resubmit would
+  // revert on the nonce/duplicate); a real revert on the first send propagates.
+  // Precompile order preserved. If the helper self-heals via poll it returns no
+  // signature — preserve the API by falling back to the empty string in that
+  // (rare) path; the registration IS confirmed present by the poll.
+  const sig = await sendPrecompilePairResilient(
+    provider,
+    [precompileIx, vaultIx],
+    async () => {
+      const v: any = await program.account.vault.fetch(opts.vaultPda);
+      const active = v.activeSession;
+      if (!active) return false;
+      const onchain: number[] = active.sessionPubkey;
+      return (
+        onchain.length === sessionPubkey.length &&
+        onchain.every((b, i) => b === sessionPubkey[i])
+      );
+    },
+  );
+  const signature = sig ?? "";
   return { sessionKeypair, signature };
 }

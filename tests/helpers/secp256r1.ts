@@ -346,6 +346,193 @@ export async function sendAndConfirmWithRetry(
   throw lastErr;
 }
 
+// Shared transient-drop classifier — the SAME set sendAndConfirmWithRetry uses.
+// A transient drop means the tx was NEVER included (stale blockhash / RPC hiccup /
+// congestion) and is safe to resubmit with a fresh blockhash. A program revert is
+// NOT transient: it means the tx WAS processed and genuinely failed → propagate.
+export function isTransientDropError(err: any): boolean {
+  const msg = String(err?.message ?? err);
+  return (
+    msg.includes("TransactionExpiredTimeoutError") ||
+    msg.includes("was not confirmed") ||
+    msg.includes("block height exceeded") ||
+    msg.includes("Blockhash not found") ||
+    msg.includes("expired")
+  );
+}
+
+// ── Resilient precompile-pair send (poll-the-result) ────────────────
+//
+// For setup txs that pair a secp256r1 precompile IMMEDIATELY before a vault ix
+// ([precompileIx, vaultIx]) and have an observable on-chain RESULT to poll
+// (e.g. open_standby raises standby_cap, set_swig sets swig_address,
+// register_session_key sets active_session, close_standby clears standby_backer).
+//
+// These pairs CANNOT route through sendAndConfirmWithRetry's blind-resubmit:
+// a LANDED-but-dropped send, blindly re-sent, would revert on the already-applied
+// state (StandbyBackerMismatch / nonce duplicate / etc.) and that revert is NOT a
+// transient drop, so sendAndConfirmWithRetry would (correctly, for ITS contract)
+// rethrow it — turning a successful first send into a spurious failure.
+//
+// The poll-the-result shape sidesteps revert-text parsing entirely:
+//   1. Send once (single-shot — byte-identical to the original happy path).
+//   2. On a PROGRAM REVERT (not a transient drop) → rethrow immediately. These
+//      setup sites are often negative-path tests where a revert is the REAL
+//      assertion; it must surface, never be swallowed.
+//   3. On a TRANSIENT drop → the tx MAY have landed. Poll the RESULT predicate.
+//      If it holds, the first send landed → success.
+//   4. If the poll shows it did NOT land (truly dropped) → rebuild with a FRESH
+//      blockhash (preserving precompile-immediately-before-vault-ix order) and
+//      re-send ONCE. A revert on THIS resend means the first send actually landed
+//      after all (already-applied) → confirm via the final poll, don't trust the
+//      revert text.
+//   5. Final authoritative poll. If the result state is present → success; else
+//      THROW (never silently continue on an unconfirmed setup).
+//
+// `instructions` MUST be [precompileIx, vaultIx] in that exact order (the handler
+// reads the precompile at current_index - 1). `pollResult` re-reads the on-chain
+// account fresh and resolves true once the expected state is visible. Purely
+// additive: the happy path (first send confirms) is identical to the original
+// single-shot send; only a dropped/never-included tx now self-heals.
+export async function sendPrecompilePairResilient(
+  provider: AnchorProvider,
+  instructions: TransactionInstruction[],
+  pollResult: () => Promise<boolean>,
+  signers: Signer[] = [],
+  pollTimeoutMs: number = 20_000,
+  pollIntervalMs: number = 250,
+): Promise<string | undefined> {
+  const send = async (): Promise<string> => {
+    const { blockhash } = await provider.connection.getLatestBlockhash("finalized");
+    const tx = new Transaction();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = provider.wallet.publicKey;
+    tx.add(...instructions); // order preserved: [precompileIx, vaultIx]
+    return await provider.sendAndConfirm(tx, signers);
+  };
+
+  const pollLanded = async (): Promise<boolean> => {
+    const deadline = Date.now() + pollTimeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        if (await pollResult()) return true;
+      } catch (err: any) {
+        const msg = String(err?.message ?? err);
+        // Tolerate the freshly-created / not-yet-visible account case; any other
+        // error propagates (we only swallow benign replica lag, never a real bug).
+        if (
+          !msg.includes("Account does not exist") &&
+          !msg.includes("has no data")
+        ) {
+          throw err;
+        }
+      }
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+    return false;
+  };
+
+  // (1) Single-shot send — identical to the original happy path.
+  try {
+    return await send();
+  } catch (err: any) {
+    // (2) Program revert on the FIRST send → genuine failure, rethrow.
+    if (!isTransientDropError(err)) throw err;
+    // (3) Transient drop: the pair MAY have landed. Poll the result.
+    if (await pollLanded()) return undefined; // it landed — success.
+  }
+
+  // (4) The result never appeared → the tx truly dropped. Re-send ONCE with a
+  //     fresh blockhash (precompile-immediately-before-vault order preserved).
+  try {
+    return await send();
+  } catch (err: any) {
+    if (!isTransientDropError(err)) {
+      // A revert here likely means the FIRST send landed after all (already
+      // applied). Confirm by poll rather than trusting the revert text.
+      if (await pollLanded()) return undefined;
+      throw err;
+    }
+    // resend itself transiently dropped → fall through to the final poll.
+  }
+
+  // (5) Final authoritative check: the result state MUST be present now.
+  if (await pollLanded()) return undefined;
+  throw new Error(
+    "sendPrecompilePairResilient: result state never confirmed after resend — " +
+      "the precompile-pair tx could not be confirmed landed",
+  );
+}
+
+// ── Resilient swig-create (check-then-skip) ─────────────────────────
+//
+// A swig CREATE (fixed swigId, non-idempotent) cannot route through
+// sendAndConfirmWithRetry's blind-resubmit: re-sending a LANDED-but-dropped
+// create reverts ("account already in use"), and that revert is not transient.
+// Mirror sendAddAuthorityResilient's check-then-skip, but the existence test is
+// "does the swig account exist" via getAccountInfo:
+//   1. Send once (identical to the original single-shot send).
+//   2. On a program revert → rethrow.
+//   3. On a transient drop → the create MAY have landed. Poll getAccountInfo for
+//      the swig address; if it exists, success.
+//   4. If it never appeared → re-send ONCE with a fresh blockhash, then poll
+//      again. If the resend reverts (first send actually landed), confirm by poll.
+//   5. If the swig still does not exist → THROW.
+//
+// Purely additive: on the happy path (first send confirms) byte-identical to the
+// original single-shot send.
+export async function sendCreateSwigResilient(
+  provider: AnchorProvider,
+  instructions: TransactionInstruction[],
+  swigAddress: PublicKey,
+  signers: Signer[] = [],
+  pollTimeoutMs: number = 20_000,
+): Promise<void> {
+  const send = async (): Promise<void> => {
+    const { blockhash } = await provider.connection.getLatestBlockhash("finalized");
+    const tx = new Transaction();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = provider.wallet.publicKey;
+    tx.add(...instructions);
+    await provider.sendAndConfirm(tx, signers);
+  };
+
+  const pollExists = async (): Promise<boolean> => {
+    try {
+      await pollUntilAccountExists(provider.connection, swigAddress, pollTimeoutMs);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // (1) Single-shot send — identical to the original happy path.
+  try {
+    await send();
+    return;
+  } catch (err: any) {
+    if (!isTransientDropError(err)) throw err;
+    // (2) Transient drop: the create MAY have landed. Poll for the swig account.
+    if (await pollExists()) return; // it landed — success.
+  }
+
+  // (3) Never appeared → re-send ONCE with a fresh blockhash, then confirm.
+  try {
+    await send();
+  } catch (err: any) {
+    if (!isTransientDropError(err)) {
+      // Resend reverts (e.g. "already in use") → the first send landed; confirm.
+      if (await pollExists()) return;
+      throw err;
+    }
+  }
+
+  if (await pollExists()) return;
+  throw new Error(
+    `sendCreateSwigResilient: swig ${swigAddress.toBase58()} never appeared after resend`,
+  );
+}
+
 // ── Resilient addAuthority (check-then-skip on transient drop) ──────
 //
 // A swig `addAuthority` send is NOT blindly retryable: re-submitting a

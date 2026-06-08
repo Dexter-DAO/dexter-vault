@@ -44,6 +44,8 @@ import {
   buildSecp256r1VerifyInstruction,
   pollUntilAccount,
   sendAddAuthorityResilient,
+  sendAndConfirmWithRetry,
+  sendPrecompilePairResilient,
 } from "./secp256r1";
 import {
   fetchSwig,
@@ -122,7 +124,12 @@ export async function migrateVaultToV5(
   provider: anchor.AnchorProvider,
   vaultPda: PublicKey,
 ): Promise<void> {
-  await program.methods
+  // migrate is safe to resend on a CONFIRMED transient drop: the resend either
+  // lands (it truly dropped) or reverts because the vault is already V5 — and the
+  // trailing pollUntilAccount(version==5) is the source of truth either way. Build
+  // the ix and route through sendAndConfirmWithRetry so a dropped send self-heals
+  // with a fresh blockhash; KEEP the existing poll.
+  const migrateIx = await program.methods
     .migrateV4ToV5({})
     .accountsPartial({
       vault: vaultPda,
@@ -130,7 +137,16 @@ export async function migrateVaultToV5(
       payer: provider.wallet.publicKey,
       systemProgram: SystemProgram.programId,
     })
-    .rpc();
+    .instruction();
+  try {
+    await sendAndConfirmWithRetry(provider, [migrateIx]);
+  } catch (err: any) {
+    // A resend after a transient drop can revert because the FIRST send actually
+    // landed (vault already V5). Confirm via the poll rather than the revert text:
+    // if the vault is V5 the migrate succeeded; otherwise the error is real.
+    const v: any = await program.account.vault.fetch(vaultPda).catch(() => null);
+    if (!v || v.version !== 5) throw err;
+  }
 
   await pollUntilAccount(
     () => program.account.vault.fetch(vaultPda),
@@ -201,8 +217,24 @@ export async function openStandby(
     })
     .instruction();
 
-  await provider.sendAndConfirm(
-    new Transaction().add(precompileIx, openStandbyIx),
+  // [precompile, open_standby] pair — resilient send + poll the RESULT (vault's
+  // standby_cap now equals `cap` and standby_backer is this financier). On a
+  // transient drop the poll confirms whether the first send landed (a blind
+  // resubmit could revert on already-applied state); a real revert on the first
+  // send propagates. Precompile order preserved (immediately before the vault
+  // ix). open_standby doubles as resize, so the cap-equality predicate is exact
+  // for both the initial open and a resize. Purely additive.
+  await sendPrecompilePairResilient(
+    provider,
+    [precompileIx, openStandbyIx],
+    async () => {
+      const v: any = await program.account.vault.fetch(userVaultPda);
+      return (
+        v.standbyCap.toString() === cap.toString() &&
+        v.standbyBacker !== null &&
+        v.standbyBacker.equals(financierSwig)
+      );
+    },
   );
 }
 
