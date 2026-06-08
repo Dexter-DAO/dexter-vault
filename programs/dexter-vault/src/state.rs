@@ -290,6 +290,11 @@ pub enum VaultError {
     NoStandbyBackerLedger,
     #[msg("A different financier already backs this vault; close the existing standby first.")]
     StandbyBackerMismatch,
+    // Raised by close_standby's financier leg (explicit in-handler is_signer check;
+    // its struct can't use a Signer type because the user leg shares it). For
+    // set_standby_reserve the same rule is enforced by the struct-level Signer type
+    // (Anchor's ConstraintSigner fires pre-handler) — this variant documents the
+    // shared consent rule across both financier-facing instructions.
     #[msg("financier consent missing: set_standby_reserve / close_standby (financier) must run as the inner CPI of the financier's swig SignV2 (swig_wallet must sign)")]
     FinancierConsentMissing,
 }

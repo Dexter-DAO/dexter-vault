@@ -95,7 +95,11 @@ pub fn handler(ctx: Context<SetStandbyReserve>, args: SetStandbyReserveArgs) -> 
     // a PDA-constrained Signer. This instruction can only execute as the inner CPI
     // of the financier's swig SignV2, which signs with that swig_wallet PDA
     // (invoke_signed). No swig authority → no signature → Anchor reverts before we
-    // get here. The write above is therefore bound to the financier's consent on
-    // THIS exact call (mechanism B). See VaultError::FinancierConsentMissing.
+    // get here (with its generic ConstraintSigner / missing-signature error, NOT a
+    // custom VaultError — the Signer constraint fires pre-handler). The write above
+    // is therefore bound to the financier's consent on THIS exact call (mechanism
+    // B). The VaultError::FinancierConsentMissing variant documents this same
+    // consent rule for close_standby's financier leg, which checks is_signer
+    // explicitly in-handler (its struct can't be a Signer — the user leg shares it).
     Ok(())
 }
