@@ -300,6 +300,52 @@ export function sessionRevokeMessage(args: SessionRevokeMessageArgs): Uint8Array
   return buf;
 }
 
+/**
+ * Send + confirm a tx, resubmitting with a FRESH blockhash if it gets dropped.
+ *
+ * provider.sendAndConfirm is single-shot: a dropped tx (stale blockhash / RPC
+ * hiccup) throws TransactionExpiredTimeoutError and is NEVER retried — fatal in
+ * dense setup paths (this suite does ~32 enrollments; one drop fails the run).
+ * This catches the drop and re-sends with a new recent blockhash up to `attempts`
+ * times. Each attempt builds a fresh Transaction (a re-used Transaction keeps its
+ * stale blockhash), so the caller passes the INSTRUCTIONS, not a built tx.
+ */
+export async function sendAndConfirmWithRetry(
+  provider: AnchorProvider,
+  instructions: TransactionInstruction[],
+  signers: Signer[] = [],
+  attempts = 4,
+): Promise<string> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const { blockhash } = await provider.connection.getLatestBlockhash("finalized");
+      const tx = new Transaction();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = provider.wallet.publicKey;
+      tx.add(...instructions);
+      // provider.sendAndConfirm signs with the wallet + any extra signers and confirms.
+      return await provider.sendAndConfirm(tx, signers);
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message ?? err);
+      // Only retry transient drop/timeout/blockhash failures — NOT program reverts
+      // (a program error means the tx WAS processed and genuinely failed; retrying
+      // would be wrong and could double-apply).
+      const isTransient =
+        msg.includes("TransactionExpiredTimeoutError") ||
+        msg.includes("was not confirmed") ||
+        msg.includes("block height exceeded") ||
+        msg.includes("Blockhash not found") ||
+        msg.includes("expired");
+      if (!isTransient || i === attempts - 1) throw err;
+      // brief backoff before fresh-blockhash resubmit
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  throw lastErr;
+}
+
 // ── Funding helper for mainnet-safe tests ───────────────────────────
 //
 // `provider.connection.requestAirdrop` returns 410 on mainnet (the API is
@@ -319,8 +365,7 @@ export async function fundFromProvider(
     toPubkey: recipient,
     lamports,
   });
-  const tx = new Transaction().add(ix);
-  await provider.sendAndConfirm(tx);
+  await sendAndConfirmWithRetry(provider, [ix]);
 }
 
 // ── Mainnet read-after-write propagation guard ──────────────────────
@@ -402,8 +447,7 @@ export async function createAtaIdempotentFinalized(
     owner,
     mint,
   );
-  const tx = new Transaction().add(ix);
-  await provider.sendAndConfirm(tx, [payer]);
+  await sendAndConfirmWithRetry(provider, [ix], [payer]);
   await pollUntilAccountExists(provider.connection, ata);
   return ata;
 }
@@ -425,7 +469,22 @@ export async function createAtaIdempotentFinalized(
 export function makeTestProvider(): AnchorProvider {
   const url = process.env.ANCHOR_PROVIDER_URL;
   if (!url) throw new Error("ANCHOR_PROVIDER_URL is not set");
-  const connection = new Connection(url, "finalized");
+  // With `finalized` commitment, sendAndConfirm waits for ~31 confirmations /
+  // 2 epochs of voting — typically 13s but occasionally longer on mainnet under
+  // load. The 90s confirm window comfortably covers normal worst-case finalized
+  // latency, so a tx that WAS included confirms inside it.
+  //
+  // But a longer confirm window does NOT fix the real flakiness. The real cause
+  // is a transient DROP: the tx is never included (stale blockhash / RPC hiccup /
+  // congestion), so it is gone from the moment it's lost — waiting longer cannot
+  // recover a tx that was never included. That self-healing lives in
+  // sendAndConfirmWithRetry, which resubmits the idempotent setup txs with a
+  // FRESH blockhash. The confirm window here only bounds how long we wait for a
+  // genuinely-included tx to finalize; it is not the resilience mechanism.
+  const connection = new Connection(url, {
+    commitment: "finalized",
+    confirmTransactionInitialTimeout: 90_000,
+  });
   // anchor.Wallet.local() reads ANCHOR_WALLET
   const wallet = (anchor as any).Wallet.local();
   const provider = new AnchorProvider(connection, wallet, {
