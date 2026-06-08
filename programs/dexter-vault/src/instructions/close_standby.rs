@@ -183,9 +183,12 @@ pub fn handler(ctx: Context<CloseStandby>, args: CloseStandbyArgs) -> Result<()>
             // financier's swig — Swig enforces the marker + authority. We mirror
             // set_standby_reserve / draw_credit: NO manual SignV2 parse here; the
             // handler only asserts account shape, Swig does the rest.
+            // A backer EXISTS (checked in core); this asserts the financier_swig
+            // passed matches it. StandbyBackerMismatch is the accurate variant —
+            // the close caller is the wrong financier, not "no backer configured".
             require!(
                 ctx.accounts.financier_swig.key() == backer,
-                VaultError::NoStandbyBacker
+                VaultError::StandbyBackerMismatch
             );
         }
     }
