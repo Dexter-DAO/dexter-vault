@@ -46,7 +46,6 @@ import { DexterVault } from "../target/types/dexter_vault";
 import {
   Keypair,
   PublicKey,
-  SYSVAR_INSTRUCTIONS_PUBKEY,
   Transaction,
 } from "@solana/web3.js";
 import { expect } from "chai";
@@ -55,8 +54,6 @@ import path from "path";
 import {
   makeTestProvider,
   createAtaIdempotentFinalized,
-  signOperationWithPasskey,
-  buildSecp256r1VerifyInstruction,
   pollUntilAccount,
 } from "./helpers/secp256r1";
 import { bootstrapForRegister } from "./helpers/register-bootstrap";
@@ -857,6 +854,14 @@ describe("Standby-reserve S8 — financier consent BINDING (mechanism B, exploit
     // SignV2, so nothing invoke_signed's the swig_wallet PDA → it is not a signer.
     // NO instructions_sysvar (the fix removed it from set_standby_reserve's
     // accounts). The runtime rejects for a missing required signature.
+    //
+    // ASSERTION VALIDITY (this is the exploit-closed proof — keep it honest): the
+    // accountsPartial below lists EXACTLY the 5 accounts of the fixed struct, all
+    // PDAs/keys valid, systemProgram present — so the ONLY missing element is the
+    // swig_wallet signature, i.e. the missing-signer path is the only plausible
+    // revert. If set_standby_reserve's account struct ever changes, re-verify this
+    // ix still reverts for the SIGNER reason and not a new missing/extra-account
+    // reason (else 8a would false-green on the wrong revert).
     const setReserveVaultIx = await program.methods
       .setStandbyReserve({ newReserve: new BN($(100).toString()) })
       .accountsPartial({
