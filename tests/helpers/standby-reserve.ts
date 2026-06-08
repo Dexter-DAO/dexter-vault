@@ -39,6 +39,7 @@ import { Program } from "@coral-xyz/anchor";
 import { DexterVault } from "../../target/types/dexter_vault";
 import {
   PublicKey,
+  SystemProgram,
   SYSVAR_INSTRUCTIONS_PUBKEY,
   Transaction,
   TransactionInstruction,
@@ -87,7 +88,7 @@ export function deriveStandbyBackerPda(
   );
 }
 
-// ── (5) close_standby USER-leg op-message ────────────────────────────────────
+// ── (2) close_standby USER-leg op-message ────────────────────────────────────
 // MUST match close_standby.rs handler byte-for-byte:
 //   "close_standby" (13) || vaultPda (32) || financierSwig (32) = 77 bytes.
 export function buildCloseStandbyMessage(
@@ -105,6 +106,53 @@ export function buildCloseStandbyMessage(
   o += 32;
   if (o !== 77) throw new Error(`close_standby message wrong length: ${o}`);
   return buf;
+}
+
+// ── Shared zero-transfer SignV2 tail ─────────────────────────────────────────
+// Both financier-leg builders (set_standby_reserve and the close_standby
+// financier leg) move NO money — their SignV2 is consent-only. This helper
+// single-sources that shared tail: fetch the financier swig, pair the SignV2
+// with the preceding vault ix via preInstructions, and send under a 600k-CU cap.
+//
+// THE EMPTY `[]`: we pass an EMPTY instruction array to getSignInstructions. The
+// Swig SDK serializes an empty Vec<Instruction> to a 1-byte [0x00] payload, which
+// Swig ACCEPTS (a literally-0-length payload would be rejected as
+// MissingInstructions, but the SDK never emits that from `[]`). The ProgramExec
+// authority then authenticates against the PRECEDING vault ix (program_id +
+// discriminator marker + accounts[0]=swig / [1]=swig_wallet), IGNORING the inner
+// payload. The empty payload does NOT weaken the consent proof.
+async function sendZeroTransferSignV2(
+  provider: anchor.AnchorProvider,
+  financierSwig: PublicKey,
+  markerRole: number,
+  vaultIx: TransactionInstruction,
+): Promise<void> {
+  const wallet = (provider.wallet as anchor.Wallet).payer;
+  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+
+  const swigForSign = await fetchSwig(
+    rpc as any,
+    kitAddress(financierSwig.toBase58()),
+  );
+  if (!swigForSign) throw new Error("Financier swig not visible for sign");
+
+  const signKitIxs = await getSignInstructions(
+    swigForSign,
+    markerRole,
+    [],
+    false,
+    {
+      payer: kitAddress(wallet.publicKey.toBase58()),
+      preInstructions: [vaultIx as any],
+    },
+  );
+  const signWeb3Ixs: TransactionInstruction[] = kitInstructionsToWeb3(signKitIxs);
+
+  const tx = new Transaction().add(
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
+    ...signWeb3Ixs,
+  );
+  await provider.sendAndConfirm(tx);
 }
 
 // ── (3) set_standby_reserve two-sibling tx ───────────────────────────────────
@@ -128,9 +176,6 @@ export async function buildSetStandbyReserveTx(
   const { financierSwig, financierSwigWalletAddress, newReserve, markerRole } =
     args;
 
-  const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
-
   const [standbyBacker] = deriveStandbyBackerPda(financierSwig);
 
   const setStandbyReserveVaultIx = await program.methods
@@ -141,36 +186,18 @@ export async function buildSetStandbyReserveTx(
       standbyBacker,
       feePayer: provider.wallet.publicKey,
       instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-      systemProgram: anchor.web3.SystemProgram.programId,
+      systemProgram: SystemProgram.programId,
     })
     .instruction();
 
-  const swigForSign = await fetchSwig(
-    rpc as any,
-    kitAddress(financierSwig.toBase58()),
-  );
-  if (!swigForSign) throw new Error("Financier swig not visible for sign");
-
-  // Zero-transfer: EMPTY instruction list `[]` → SDK serializes to [0x00], which
-  // Swig accepts. The ProgramExec authority authenticates against the preceding
-  // vault ix, ignoring the (empty) inner payload.
-  const signKitIxs = await getSignInstructions(
-    swigForSign,
+  // Zero-transfer consent: pair the vault ix with an empty-`[]` SignV2. See
+  // sendZeroTransferSignV2 for the full rationale.
+  await sendZeroTransferSignV2(
+    provider,
+    financierSwig,
     markerRole,
-    [],
-    false,
-    {
-      payer: kitAddress(wallet.publicKey.toBase58()),
-      preInstructions: [setStandbyReserveVaultIx as any],
-    },
+    setStandbyReserveVaultIx,
   );
-  const signWeb3Ixs: TransactionInstruction[] = kitInstructionsToWeb3(signKitIxs);
-
-  const tx = new Transaction().add(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
-    ...signWeb3Ixs,
-  );
-  await provider.sendAndConfirm(tx);
 }
 
 // ── (4) close_standby — both consent legs ────────────────────────────────────
@@ -245,9 +272,6 @@ export async function buildCloseStandbyTx(
   if (markerRole === undefined)
     throw new Error("close_standby financier leg requires markerRole");
 
-  const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
-
   const closeVaultIx = await program.methods
     .closeStandby({
       closer: { financier: {} },
@@ -263,28 +287,12 @@ export async function buildCloseStandbyTx(
     })
     .instruction();
 
-  const swigForSign = await fetchSwig(
-    rpc as any,
-    kitAddress(financierSwig.toBase58()),
-  );
-  if (!swigForSign) throw new Error("Financier swig not visible for sign");
-
-  // Same zero-transfer SignV2 pattern as set_standby_reserve: EMPTY `[]`.
-  const signKitIxs = await getSignInstructions(
-    swigForSign,
+  // Same zero-transfer SignV2 pattern as set_standby_reserve: empty `[]`. See
+  // sendZeroTransferSignV2 for the full rationale.
+  await sendZeroTransferSignV2(
+    provider,
+    financierSwig,
     markerRole,
-    [],
-    false,
-    {
-      payer: kitAddress(wallet.publicKey.toBase58()),
-      preInstructions: [closeVaultIx as any],
-    },
+    closeVaultIx,
   );
-  const signWeb3Ixs: TransactionInstruction[] = kitInstructionsToWeb3(signKitIxs);
-
-  const tx = new Transaction().add(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
-    ...signWeb3Ixs,
-  );
-  await provider.sendAndConfirm(tx);
 }
