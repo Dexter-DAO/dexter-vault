@@ -17,9 +17,10 @@
 //! Self-validation division (mirrors draw_credit exactly): this HANDLER does NOT
 //! introspect the following SignV2 itself. draw_credit's handler performs no
 //! manual instructions-sysvar parse of the next instruction — it relies purely on
-//! the account-position constraints (financier_swig at the index Swig's
-//! ProgramExec validator expects, financier_swig_wallet_address PDA-constrained,
-//! instructions_sysvar address-constrained) plus Swig's own validator to enforce
+//! the account-position constraints (financier_swig at index 0 and
+//! financier_swig_wallet_address at index 1 — the fixed offsets Swig's ProgramExec
+//! validator reads, the latter PDA-constrained; instructions_sysvar
+//! address-constrained) plus Swig's own validator to enforce
 //! the marker + authority. We mirror that: this handler only validates account
 //! shape + mutates ledger state.
 //!
@@ -33,7 +34,29 @@ use crate::state::*;
 
 #[derive(Accounts)]
 pub struct SetStandbyReserve<'info> {
+    /// Position 0 — required at this index by Swig's ProgramExec validator on the
+    /// following SignV2 (the validator hard-codes config_account_index = 0 and
+    /// reads get_account_meta_at_unchecked(0), asserting it equals the financier
+    /// swig). The FINANCIER's swig (identity + authority). It is the seed source
+    /// for standby_backer.
+    /// CHECK: identity-only; never deserialized (the firewall).
+    pub financier_swig: AccountInfo<'info>,
+
+    /// Position 1 — required at this index by Swig's ProgramExec validator (the
+    /// validator hard-codes wallet_account_index = 1 and reads
+    /// get_account_meta_at_unchecked(1), asserting it equals the swig wallet).
+    /// Derives from the financier's swig (mirrors draw_credit).
+    /// CHECK: PDA constraint validates derivation; never deref.
+    #[account(
+        seeds = [SWIG_WALLET_ADDRESS_SEED, financier_swig.key().as_ref()],
+        bump,
+        seeds::program = SWIG_PROGRAM_ID,
+    )]
+    pub financier_swig_wallet_address: AccountInfo<'info>,
+
     /// The financier's reserve ledger. Init on first call, mutated thereafter.
+    /// Its seeds/init work regardless of struct position; it MUST come after the
+    /// two ProgramExec-fixed accounts above so financier_swig stays at index 0.
     #[account(
         init_if_needed,
         payer = fee_payer,
@@ -42,22 +65,6 @@ pub struct SetStandbyReserve<'info> {
         bump,
     )]
     pub standby_backer: Account<'info, StandbyBacker>,
-
-    /// Position 0 — required by Swig's ProgramExec validator on the following
-    /// SignV2. The FINANCIER's swig (identity + authority). It is the seed source
-    /// for standby_backer.
-    /// CHECK: identity-only; never deserialized (the firewall).
-    pub financier_swig: AccountInfo<'info>,
-
-    /// Position 1 — required by Swig's ProgramExec validator. Derives from the
-    /// financier's swig (mirrors draw_credit).
-    /// CHECK: PDA constraint validates derivation; never deref.
-    #[account(
-        seeds = [SWIG_WALLET_ADDRESS_SEED, financier_swig.key().as_ref()],
-        bump,
-        seeds::program = SWIG_PROGRAM_ID,
-    )]
-    pub financier_swig_wallet_address: AccountInfo<'info>,
 
     #[account(mut)]
     pub fee_payer: Signer<'info>,
