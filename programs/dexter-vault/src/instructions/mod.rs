@@ -23,6 +23,7 @@ pub mod draw_credit;
 pub mod set_standby_reserve;
 pub mod repay_credit;
 pub mod seize_collateral;
+pub mod close_standby;
 
 // Glob re-exports are required by Anchor: the `#[program]` macro resolves the
 // `#[derive(Accounts)]`-generated helper modules (`__client_accounts_*`,
@@ -82,3 +83,5 @@ pub use set_standby_reserve::*;
 pub use repay_credit::*;
 #[allow(ambiguous_glob_reexports)]
 pub use seize_collateral::*;
+#[allow(ambiguous_glob_reexports)]
+pub use close_standby::*;

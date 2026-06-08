@@ -179,4 +179,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::set_standby_reserve::handler(ctx, args)
     }
+
+    pub fn close_standby(
+        ctx: Context<CloseStandby>,
+        args: CloseStandbyArgs,
+    ) -> Result<()> {
+        instructions::close_standby::handler(ctx, args)
+    }
 }
