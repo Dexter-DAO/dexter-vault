@@ -56,6 +56,7 @@ import {
   pollUntilAccountExists,
   pollUntilAccount,
   createAtaIdempotentFinalized,
+  sendAddAuthorityResilient,
 } from "./secp256r1";
 
 // settle_tab_voucher's Anchor discriminator — the 8-byte instruction-data
@@ -237,6 +238,11 @@ export async function bootstrapForRegister(
     kitAddress(swigAddress.toBase58()),
   );
   if (!swigForAdd) throw new Error("Swig not visible post-create");
+  // Role count BEFORE the add — the add appends role 1 onto the fresh swig
+  // (role 0 = bootstrap manageAuthority). Used by sendAddAuthorityResilient to
+  // confirm the add actually landed (defeats a dropped-but-landed send).
+  const rolesBefore: any[] =
+    (swigForAdd as any).roles ?? (swigForAdd as any).authorities ?? [];
   const addAuthorityIxs = await getAddAuthorityInstructions(
     swigForAdd,
     0,
@@ -244,8 +250,15 @@ export async function bootstrapForRegister(
     vaultActions,
     { payer: kitAddress(wallet.publicKey.toBase58()) },
   );
-  await provider.sendAndConfirm(
-    new Transaction().add(...kitInstructionsToWeb3(addAuthorityIxs)),
+  await sendAddAuthorityResilient(
+    provider,
+    kitInstructionsToWeb3(addAuthorityIxs),
+    async () => {
+      const s = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
+      const roles: any[] = (s as any)?.roles ?? (s as any)?.authorities ?? [];
+      return roles.length;
+    },
+    rolesBefore.length + 1,
   );
 
   // ── set_swig — passkey signs, binding the vault to the real Swig. ────────

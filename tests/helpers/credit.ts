@@ -43,6 +43,7 @@ import {
   signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
   pollUntilAccount,
+  sendAddAuthorityResilient,
 } from "./secp256r1";
 import {
   fetchSwig,
@@ -353,8 +354,19 @@ export async function registerMarkerOnSwig(args: {
     fullActions,
     { payer: kitAddress(wallet.publicKey.toBase58()) },
   );
-  await provider.sendAndConfirm(
-    new Transaction().add(...kitInstructionsToWeb3(addAuthorityIxs)),
+  // Resilient send: a dropped-but-landed addAuthority is confirmed via a
+  // role-count poll (role count must reach newRoleIndex + 1), NOT blindly
+  // re-sent (which would append a duplicate role). Happy path is identical to
+  // the original single-shot send.
+  await sendAddAuthorityResilient(
+    provider,
+    kitInstructionsToWeb3(addAuthorityIxs),
+    async () => {
+      const s = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
+      const roles: any[] = (s as any)?.roles ?? (s as any)?.authorities ?? [];
+      return roles.length;
+    },
+    newRoleIndex + 1,
   );
 
   return newRoleIndex;

@@ -55,6 +55,7 @@ import {
   P256Keypair,
   signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
+  sendAddAuthorityResilient,
 } from "./secp256r1";
 import {
   fetchSwig,
@@ -167,8 +168,18 @@ export async function registerProgramAuthorityOnSwig(args: {
     programActions,
     { payer: kitAddress(wallet.publicKey.toBase58()) },
   );
-  await provider.sendAndConfirm(
-    new Transaction().add(...kitInstructionsToWeb3(addAuthorityIxs)),
+  // Resilient send (same class as registerMarkerOnSwig): a dropped-but-landed
+  // addAuthority is confirmed via a role-count poll (must reach
+  // newRoleIndex + 1), never blindly re-sent. Happy path unchanged.
+  await sendAddAuthorityResilient(
+    provider,
+    kitInstructionsToWeb3(addAuthorityIxs),
+    async () => {
+      const s = await fetchSwig(rpc as any, kitAddress(swigAddress.toBase58()));
+      const roles: any[] = (s as any)?.roles ?? (s as any)?.authorities ?? [];
+      return roles.length;
+    },
+    newRoleIndex + 1,
   );
 
   return newRoleIndex;
@@ -212,11 +223,70 @@ async function sendVaultCpiSignV2(
   );
   const signWeb3Ixs: TransactionInstruction[] = kitInstructionsToWeb3(signKitIxs);
 
-  const tx = new Transaction().add(
+  // The CU-limit + the SignV2 ixs. signWeb3Ixs do NOT embed the blockhash (the
+  // Transaction does), so rebuilding a fresh Transaction over the SAME ixs with
+  // a fresh blockhash is the correct way to re-send a dropped tx.
+  const innerIxs = [
     ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
     ...signWeb3Ixs,
-  );
-  await provider.sendAndConfirm(tx);
+  ];
+
+  const buildTx = async (): Promise<Transaction> => {
+    const { blockhash } = await provider.connection.getLatestBlockhash("finalized");
+    const tx = new Transaction();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = provider.wallet.publicKey;
+    tx.add(...innerIxs);
+    return tx;
+  };
+
+  const isTransientDrop = (err: any): boolean => {
+    const msg = String(err?.message ?? err);
+    return (
+      msg.includes("TransactionExpiredTimeoutError") ||
+      msg.includes("was not confirmed") ||
+      msg.includes("block height exceeded") ||
+      msg.includes("Blockhash not found") ||
+      msg.includes("expired")
+    );
+  };
+
+  // A revert on the RE-SEND that means the FIRST send actually landed (the
+  // standby was already set/closed by the dropped-but-confirmed tx). These are
+  // the program/state errors a no-op re-close/re-set produces; seeing one on
+  // retry is PROOF the original send took effect → treat as success.
+  const isAlreadyAppliedRevert = (err: any): boolean => {
+    const msg = String(err?.message ?? err);
+    return (
+      msg.includes("StandbyBackerMismatch") ||
+      msg.includes("StandbyNotFound") ||
+      msg.includes("StandbyAlreadyClosed") ||
+      msg.includes("AccountNotInitialized") ||
+      msg.includes("0xbc4") || // AccountNotInitialized (standby_backer/vault gone)
+      msg.includes("ReserveBelowPromised") || // re-set racing the landed set
+      msg.includes("AccountOwnedByWrongProgram") // closed account reassigned
+    );
+  };
+
+  // (1) Single-shot send — identical to the original happy path.
+  try {
+    await provider.sendAndConfirm(await buildTx());
+    return;
+  } catch (err: any) {
+    // Program revert on the FIRST send → genuine failure, rethrow (a real
+    // StandbyStillBorrowed / FinancierConsentMissing must still surface).
+    if (!isTransientDrop(err)) throw err;
+  }
+
+  // (2) Transient drop: the SignV2 MAY have landed. Re-send with a fresh
+  //     blockhash. If THIS one reverts with an "already-applied" state error,
+  //     the first send landed → success. Any other revert is a real failure.
+  try {
+    await provider.sendAndConfirm(await buildTx());
+  } catch (err: any) {
+    if (isAlreadyAppliedRevert(err)) return; // first send had landed.
+    throw err;
+  }
 }
 
 // ── (3) set_standby_reserve via inner-CPI SignV2 ─────────────────────────────

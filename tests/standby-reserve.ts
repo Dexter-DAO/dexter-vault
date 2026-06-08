@@ -93,6 +93,30 @@ async function fetchBacker(
   };
 }
 
+// Assert a StandbyBacker's aggregate_promised == `expected`, POLLING until the
+// value materializes (or timing out). `fetchBacker` does a single immediate
+// `.fetch()`, which on a lagging Helius read replica can serve stale
+// pre-mutation state right after the tx that caused the change — exactly the
+// S5 read-after-write race (close lands, replica still shows the old
+// aggregate). pollUntilAccount retries the read until aggregatePromised reaches
+// the expected value. This does NOT weaken the assertion: if the value never
+// reaches `expected`, the poll TIMES OUT and the test fails — identical
+// outcome to a single fetch that read a genuinely-wrong value, just lag-
+// tolerant. Use for any aggregate read taken immediately AFTER a mutating tx.
+async function expectBackerAggregate(
+  program: Program<DexterVault>,
+  financierSwig: PublicKey,
+  expected: string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const [backerPda] = deriveStandbyBackerPda(financierSwig);
+  await pollUntilAccount(
+    () => program.account.standbyBacker.fetch(backerPda),
+    (b: any) => b.aggregatePromised.toString() === expected,
+    timeoutMs,
+  );
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Shared per-scenario harness. Mirrors credit-antirug.ts: a fresh provider +
 // program per describe. We enroll the financier + register ONE Program(vault)
@@ -174,9 +198,11 @@ describe("Standby-reserve S1 — reserve ceiling (Σ ≤ committed_reserve)", ()
       newReserve: R,
       programRole,
     });
-    let backer = await fetchBacker(program, financier.swigAddress);
+    // Post-set_standby_reserve: aggregate starts at 0 (just-inited ledger),
+    // reserve == R. Poll the aggregate (defeats replica lag on the fresh init).
+    await expectBackerAggregate(program, financier.swigAddress, "0");
+    const backer = await fetchBacker(program, financier.swigAddress);
     expect(backer.reserve).to.equal(R.toString());
-    expect(backer.aggregate).to.equal("0");
 
     // Two user vaults backed by this financier.
     const vaultA = await enrollUserOnMint(program, provider, financier.mint, 0n);
@@ -189,8 +215,7 @@ describe("Standby-reserve S1 — reserve ceiling (Σ ≤ committed_reserve)", ()
       financierSwig: financier.swigAddress,
       cap: R,
     });
-    backer = await fetchBacker(program, financier.swigAddress);
-    expect(backer.aggregate).to.equal(R.toString());
+    await expectBackerAggregate(program, financier.swigAddress, R.toString());
 
     // vaultB tries to promise ONE more unit → would push aggregate to R+1 > R.
     let threw = false;
@@ -212,8 +237,7 @@ describe("Standby-reserve S1 — reserve ceiling (Σ ≤ committed_reserve)", ()
 
     // The failed open moved NOTHING: aggregate still == R (not R+1), and
     // vaultB never got terms.
-    backer = await fetchBacker(program, financier.swigAddress);
-    expect(backer.aggregate).to.equal(R.toString());
+    await expectBackerAggregate(program, financier.swigAddress, R.toString());
     const vB = await program.account.vault.fetch(vaultB.vaultPda);
     expect((vB as any).standbyBacker).to.equal(null);
     expect((vB as any).standbyCap.toString()).to.equal("0");
@@ -256,8 +280,7 @@ describe("Standby-reserve S4 — reserve lowering down to (and below) aggregate_
       financierSwig: financier.swigAddress,
       cap: X,
     });
-    let backer = await fetchBacker(program, financier.swigAddress);
-    expect(backer.aggregate).to.equal(X.toString());
+    await expectBackerAggregate(program, financier.swigAddress, X.toString());
 
     // Lower reserve exactly to aggregate_promised (X) — allowed (>=).
     await buildSetStandbyReserveTx(program, provider, {
@@ -266,8 +289,8 @@ describe("Standby-reserve S4 — reserve lowering down to (and below) aggregate_
       newReserve: X,
       programRole,
     });
-    backer = await fetchBacker(program, financier.swigAddress);
-    expect(backer.reserve).to.equal(X.toString());
+    const backerAfterLower = await fetchBacker(program, financier.swigAddress);
+    expect(backerAfterLower.reserve).to.equal(X.toString());
 
     // One unit below aggregate_promised → ReserveBelowPromised.
     let threw = false;
@@ -288,8 +311,8 @@ describe("Standby-reserve S4 — reserve lowering down to (and below) aggregate_
     ).to.equal(true);
 
     // Reserve unchanged by the failed lowering.
-    backer = await fetchBacker(program, financier.swigAddress);
-    expect(backer.reserve).to.equal(X.toString());
+    const backerAfterFailedLower = await fetchBacker(program, financier.swigAddress);
+    expect(backerAfterFailedLower.reserve).to.equal(X.toString());
   });
 });
 
@@ -339,9 +362,7 @@ describe("Standby-reserve S3 — resize delta tracking + resize-below-borrowed",
       financierSwig: financier.swigAddress,
       cap: $(100),
     });
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      $(100).toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, $(100).toString());
 
     // resize-down to 60 → delta -40 → aggregate 60.
     await openStandby(program, provider, {
@@ -350,9 +371,7 @@ describe("Standby-reserve S3 — resize delta tracking + resize-below-borrowed",
       financierSwig: financier.swigAddress,
       cap: $(60),
     });
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      $(60).toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, $(60).toString());
 
     // resize-up to 90 → delta +30 → aggregate 90.
     await openStandby(program, provider, {
@@ -361,9 +380,7 @@ describe("Standby-reserve S3 — resize delta tracking + resize-below-borrowed",
       financierSwig: financier.swigAddress,
       cap: $(90),
     });
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      $(90).toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, $(90).toString());
 
     // Draw to 50 (borrowed = $50, within the $90 cap).
     await drawCreditAtomic(program, provider, {
@@ -406,9 +423,7 @@ describe("Standby-reserve S3 — resize delta tracking + resize-below-borrowed",
     // The failed resize moved nothing: cap still 90, aggregate still 90.
     const vPost = await program.account.vault.fetch(user.vaultPda);
     expect((vPost as any).standbyCap.toString()).to.equal($(90).toString());
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      $(90).toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, $(90).toString());
   });
 });
 
@@ -463,9 +478,7 @@ describe("Standby-reserve S5 — block backer-change while one is set", () => {
       financierSwig: finA.financier.swigAddress,
       cap: C,
     });
-    expect(
-      (await fetchBacker(program, finA.financier.swigAddress)).aggregate,
-    ).to.equal(C.toString());
+    await expectBackerAggregate(program, finA.financier.swigAddress, C.toString());
 
     // financierB tries to overwrite → StandbyBackerMismatch.
     let threw = false;
@@ -493,9 +506,10 @@ describe("Standby-reserve S5 — block backer-change while one is set", () => {
       financierSwigWalletAddress: finA.financier.swigWalletAddress,
       programRole: finA.programRole,
     });
-    expect(
-      (await fetchBacker(program, finA.financier.swigAddress)).aggregate,
-    ).to.equal("0");
+    // S5's previously-flaky assertion: read the aggregate AFTER the financier
+    // close. Polled (defeats Helius read-replica lag — the close may land a
+    // beat before the replica reflects it).
+    await expectBackerAggregate(program, finA.financier.swigAddress, "0");
     const vCleared = await program.account.vault.fetch(user.vaultPda);
     expect((vCleared as any).standbyBacker).to.equal(null);
     expect((vCleared as any).standbyCap.toString()).to.equal("0");
@@ -507,9 +521,7 @@ describe("Standby-reserve S5 — block backer-change while one is set", () => {
       financierSwig: finB.financier.swigAddress,
       cap: C,
     });
-    expect(
-      (await fetchBacker(program, finB.financier.swigAddress)).aggregate,
-    ).to.equal(C.toString());
+    await expectBackerAggregate(program, finB.financier.swigAddress, C.toString());
     const vNew = await program.account.vault.fetch(user.vaultPda);
     expect((vNew as any).standbyBacker.toString()).to.equal(
       finB.financier.swigAddress.toString(),
@@ -583,9 +595,7 @@ describe("Standby-reserve S2 — close lifecycle (financier leg, borrowed gate)"
       financierSwig: financier.swigAddress,
       cap: C,
     });
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      C.toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, C.toString());
 
     // Draw to D>0.
     await drawCreditAtomic(program, provider, {
@@ -625,9 +635,7 @@ describe("Standby-reserve S2 — close lifecycle (financier leg, borrowed gate)"
       "financier close with an open loan should reject (StandbyStillBorrowed)",
     ).to.equal(true);
     // The blocked close moved nothing: aggregate still C, terms intact.
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      C.toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, C.toString());
 
     // Repay to 0.
     await repayCreditAtomic(program, provider, {
@@ -656,9 +664,7 @@ describe("Standby-reserve S2 — close lifecycle (financier leg, borrowed gate)"
       financierSwigWalletAddress: financier.swigWalletAddress,
       programRole,
     });
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      "0",
-    );
+    await expectBackerAggregate(program, financier.swigAddress, "0");
     const vPost = await program.account.vault.fetch(user.vaultPda);
     expect((vPost as any).standbyBacker).to.equal(null);
     expect((vPost as any).standbyCap.toString()).to.equal("0");
@@ -703,9 +709,7 @@ describe("Standby-reserve S6 — user-callable close (the bilateral escape-hatch
       financierSwig: financier.swigAddress,
       cap: C,
     });
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      C.toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, C.toString());
 
     // USER-leg close: only the user's passkey signs — NO financier SignV2.
     await buildCloseStandbyTx(program, provider, {
@@ -717,9 +721,7 @@ describe("Standby-reserve S6 — user-callable close (the bilateral escape-hatch
     });
 
     // financier.aggregate dropped by C; vault terms cleared.
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      "0",
-    );
+    await expectBackerAggregate(program, financier.swigAddress, "0");
     const vPost = await program.account.vault.fetch(user.vaultPda);
     expect((vPost as any).standbyBacker).to.equal(null);
     expect((vPost as any).standbyCap.toString()).to.equal("0");
@@ -800,9 +802,7 @@ describe("Standby-reserve S6 — user-callable close (the bilateral escape-hatch
     const vPost = await program.account.vault.fetch(user.vaultPda);
     expect((vPost as any).standbyCap.toString()).to.equal(C.toString());
     expect((vPost as any).borrowed.toString()).to.equal(D.toString());
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      C.toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, C.toString());
   });
 });
 
@@ -997,9 +997,7 @@ describe("Standby-reserve S8 — financier consent BINDING (mechanism B, exploit
         financier.swigAddress.toString(),
       );
       expect((v as any).standbyCap.toString()).to.equal($(50).toString());
-      expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-        $(50).toString(),
-      );
+      await expectBackerAggregate(program, financier.swigAddress, $(50).toString());
     }
 
     // (3) THE ATTACK: build close_standby{closer: Financier} as a BARE ix and send
@@ -1097,9 +1095,7 @@ describe("Standby-reserve S9 — ceiling enforced at OPEN time (not deferred to 
       financierSwig: financier.swigAddress,
       cap: R,
     });
-    expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
-      R.toString(),
-    );
+    await expectBackerAggregate(program, financier.swigAddress, R.toString());
 
     // vaultB's open is rejected AT open_standby — the line never opens, so no
     // draw is ever reachable. Proves open-time enforcement.

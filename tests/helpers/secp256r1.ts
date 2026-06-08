@@ -346,6 +346,109 @@ export async function sendAndConfirmWithRetry(
   throw lastErr;
 }
 
+// ── Resilient addAuthority (check-then-skip on transient drop) ──────
+//
+// A swig `addAuthority` send is NOT blindly retryable: re-submitting a
+// LANDED-but-dropped add would append a DUPLICATE role (or fail "already
+// exists"). So it must NOT route through sendAndConfirmWithRetry (which
+// blind-resubmits). Instead we CHECK-THEN-SKIP:
+//
+//   1. Send the add once (single-shot, exactly like the original code — a
+//      send that would have landed still lands identically).
+//   2. If it throws a TRANSIENT drop (timeout / stale blockhash — NOT a
+//      program revert), the add MAY have landed. Poll the swig's role count
+//      until it reaches `expectedRoleCountAfter`. If it does, the add landed:
+//      treat as success.
+//   3. If the poll times out (the role count never advanced → the tx truly
+//      dropped, never landed), re-send ONCE with a fresh blockhash, then poll
+//      again to confirm it landed.
+//   4. If after all that the role count still hasn't reached the expected
+//      value, THROW — do NOT silently continue (a false "success" would only
+//      surface as a confusing downstream failure).
+//
+// KEY correctness property: when this returns, the authority IS present on the
+// swig — verified by an actual role-count read, never assumed.
+//
+// `refetchRoleCount` re-fetches the swig fresh each call and returns its
+// current authority count (the same `(swig.roles ?? swig.authorities).length`
+// read the call sites already use). `addAuthorityIxs` are web3 instructions
+// (already converted from kit) for the add. Purely additive: on the happy path
+// (send succeeds) this is byte-identical to the original single-shot send.
+export async function sendAddAuthorityResilient(
+  provider: AnchorProvider,
+  addAuthorityIxs: TransactionInstruction[],
+  refetchRoleCount: () => Promise<number>,
+  expectedRoleCountAfter: number,
+  pollTimeoutMs: number = 20_000,
+): Promise<void> {
+  const isTransientDrop = (err: any): boolean => {
+    const msg = String(err?.message ?? err);
+    return (
+      msg.includes("TransactionExpiredTimeoutError") ||
+      msg.includes("was not confirmed") ||
+      msg.includes("block height exceeded") ||
+      msg.includes("Blockhash not found") ||
+      msg.includes("expired")
+    );
+  };
+
+  const send = async (): Promise<void> => {
+    const { blockhash } = await provider.connection.getLatestBlockhash("finalized");
+    const tx = new Transaction();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = provider.wallet.publicKey;
+    tx.add(...addAuthorityIxs);
+    await provider.sendAndConfirm(tx);
+  };
+
+  const pollLanded = async (): Promise<boolean> => {
+    try {
+      await pollUntilAccount(
+        refetchRoleCount,
+        (count) => count >= expectedRoleCountAfter,
+        pollTimeoutMs,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // (1) Single-shot send — identical to the original happy path.
+  try {
+    await send();
+    return;
+  } catch (err: any) {
+    // A program revert (e.g. "already exists") is NOT transient: rethrow.
+    if (!isTransientDrop(err)) throw err;
+    // (2) Transient drop: the add MAY have landed. Poll for the role count.
+    if (await pollLanded()) return; // it landed — success.
+  }
+
+  // (3) The role count never advanced → the tx truly dropped. Re-send ONCE
+  //     with a fresh blockhash, then confirm via poll.
+  try {
+    await send();
+  } catch (err: any) {
+    // The resend itself may transiently drop too; fall through to the final
+    // poll, which is the authoritative check for "is the authority present".
+    if (!isTransientDrop(err)) {
+      // If the resend reverts (e.g. the FIRST send actually landed after all
+      // and this one hits "already exists"), the authority is present — verify
+      // by poll rather than trusting the revert text.
+      if (await pollLanded()) return;
+      throw err;
+    }
+  }
+
+  // (4) Final authoritative check: the authority MUST be present now.
+  if (await pollLanded()) return;
+  throw new Error(
+    `sendAddAuthorityResilient: role count never reached ${expectedRoleCountAfter} ` +
+      `after resend — addAuthority could not be confirmed present on the swig`,
+  );
+}
+
 // ── Funding helper for mainnet-safe tests ───────────────────────────
 //
 // `provider.connection.requestAirdrop` returns 410 on mainnet (the API is
