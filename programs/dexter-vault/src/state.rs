@@ -182,6 +182,47 @@ pub const LOCKED_CLAIM_SEED: &[u8] = b"locked-claim";
 /// LockedClaim layout version.
 pub const LOCKED_CLAIM_VERSION_V1: u8 = 1;
 
+/// Financier reserve ledger (aggregate-reserve primitive). One per financier
+/// swig identity. The program reads THIS (allowed) but never the financier's
+/// Vault (forbidden — the rehypothecation firewall). Enforces
+/// `aggregate_promised <= committed_reserve` so a financier cannot promise more
+/// standby capacity across vaults than they have committed.
+#[account]
+#[derive(InitSpace)]
+pub struct StandbyBacker {
+    /// Layout version. v1 is the first version (byte 0 for future branching).
+    pub version: u8,
+    pub bump: u8,
+    /// The financier swig identity this ledger belongs to. Equals the PDA seed.
+    pub financier_swig: Pubkey,
+    /// What the financier has committed as backable capacity. v1: a DECLARED
+    /// number (set via set_standby_reserve under the financier's swig authority).
+    /// The aggregate guard checks promises against this.
+    pub committed_reserve: u64,
+    /// Sum of `standby_cap` across all user vaults this financier currently backs.
+    /// Rises on open_standby (fresh/resize-up), falls on close_standby/resize-down.
+    /// Invariant: aggregate_promised <= committed_reserve always.
+    pub aggregate_promised: u64,
+    /// Declared vs Locked reserve. ALWAYS Declared in this version. Planting the
+    /// enum now means a future locked-reserve variant needs no account migration.
+    pub reserve_kind: ReserveKind,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
+pub enum ReserveKind {
+    /// v1: financier declared a number. The "funds actually exist" check stays at
+    /// draw time (the existing SignV2 transfer fails if the ATA is bare).
+    Declared,
+    /// Future: committed_reserve == a program-controlled locked balance.
+    /// NOT implemented in v1 — present only so it needs no account migration later.
+    Locked,
+}
+
+/// StandbyBacker PDA seed prefix. PDA = [STANDBY_BACKER_SEED, financier_swig].
+pub const STANDBY_BACKER_SEED: &[u8] = b"standby-backer";
+/// StandbyBacker layout version.
+pub const STANDBY_BACKER_VERSION_V1: u8 = 1;
+
 #[error_code]
 pub enum VaultError {
     #[msg("Cooling-off period has not elapsed")]
@@ -236,4 +277,16 @@ pub enum VaultError {
     NoStandbyBacker,
     #[msg("Nothing is borrowed on this vault.")]
     NothingBorrowed,
+    #[msg("Promising this standby would exceed the financier's committed reserve.")]
+    StandbyWouldExceedReserve,
+    #[msg("Cannot lower committed reserve below the amount already promised.")]
+    ReserveBelowPromised,
+    #[msg("Cannot set a standby cap below the amount already borrowed.")]
+    ResizeBelowBorrowed,
+    #[msg("Cannot close a standby while a balance is still borrowed against it.")]
+    StandbyStillBorrowed,
+    #[msg("Financier StandbyBacker reserve ledger is missing or does not match.")]
+    NoStandbyBackerLedger,
+    #[msg("A different financier already backs this vault; close the existing standby first.")]
+    StandbyBackerMismatch,
 }
