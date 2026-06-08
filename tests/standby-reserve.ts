@@ -10,8 +10,10 @@
 //
 // Instructions exercised:
 //   - set_standby_reserve(new_reserve) — financier sets/changes committed_reserve
-//       (consent = financier swig-authority SignV2, zero-transfer). Lowering below
-//       aggregate_promised → ReserveBelowPromised. First call INITS the ledger.
+//       (consent = mechanism B: the ix runs as the INNER CPI of the financier
+//       swig's SignV2, which invoke_signed's the swig_wallet PDA as signer).
+//       Lowering below aggregate_promised → ReserveBelowPromised. First call INITS
+//       the ledger.
 //   - open_standby(cap) — user opens/resizes a standby line backed by a financier;
 //       updates aggregate_promised by the delta, enforces the ceiling on increase
 //       (StandbyWouldExceedReserve), blocks resize-below-borrowed
@@ -47,6 +49,7 @@ import {
   Keypair,
   PublicKey,
   Transaction,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
 import { expect } from "chai";
 import { readFileSync } from "fs";
@@ -936,6 +939,121 @@ describe("Standby-reserve S8 — financier consent BINDING (mechanism B, exploit
     expect(info, "no StandbyBacker ledger may exist after the unauthorized route").to.equal(
       null,
     );
+  });
+
+  it("(c) bare close_standby{financier} (no SignV2 → swig_wallet not a signer) REVERTS with FinancierConsentMissing; standby NOT cleared", async function () {
+    this.timeout(600_000);
+
+    // The close financier leg uses the OTHER, higher-risk binding mechanism: not a
+    // struct-level `Signer` (8a's set_standby_reserve), but an IN-ARM
+    // `require!(financier_swig_wallet_address.is_signer, FinancierConsentMissing)`.
+    // The struct types that account as `AccountInfo` (the user leg shares the
+    // struct), so a bare ix does NOT fail at sig-verification pre-handler like 8a —
+    // it REACHES the handler and the in-arm check fires. This is the close-leg
+    // analog of 8a, and the ONLY negative test for the in-arm mechanism.
+    //
+    // CONTROL FLOW (confirmed against close_standby.rs handler):
+    //   1. backer = vault.standby_backer (exists — we open a standby below)
+    //   2. Closer::Financier arm: financier_swig.key() == backer → StandbyBackerMismatch
+    //      — we pass the REAL backer (we opened with it), so this PASSES.
+    //   3. financier_swig_wallet_address.is_signer → FinancierConsentMissing
+    //      — bare ix, not wrapped in a SignV2, so the swig_wallet PDA is NOT a
+    //        signer → THIS is what reverts.
+    //   4. close_standby_core (the decrement + clear) runs ONLY after the arm, so it
+    //      never executes → standby is NOT cleared.
+    // Because the identity check (step 2) passes with the correct backer, the revert
+    // is specifically FinancierConsentMissing (NOT StandbyBackerMismatch). Asserting
+    // the specific error is therefore correct here (unlike 8a, where the pre-handler
+    // signer-verification failure surfaces no custom error).
+
+    // Setup: a vault with an OPEN standby (borrowed==0) that we then bare-close.
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      $(10),
+    );
+
+    // (1) Set a reserve via the LEGIT mechanism-B path — inits the ledger + commits
+    //     reserve with real financier consent.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financier.swigAddress,
+      financierSwigWalletAddress: financier.swigWalletAddress,
+      newReserve: $(100),
+      programRole,
+    });
+
+    // (2) User vault opens a standby backed by this financier. cap=$50, borrowed=0.
+    const user = await enrollUserOnMint(program, provider, financier.mint, 0n);
+    await openStandby(program, provider, {
+      userVaultPda: user.vaultPda,
+      userPasskey: user.passkey,
+      financierSwig: financier.swigAddress,
+      cap: $(50),
+    });
+    // Sanity: terms set + financier promised $50.
+    {
+      const v = await program.account.vault.fetch(user.vaultPda);
+      expect((v as any).standbyBacker.toString()).to.equal(
+        financier.swigAddress.toString(),
+      );
+      expect((v as any).standbyCap.toString()).to.equal($(50).toString());
+      expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
+        $(50).toString(),
+      );
+    }
+
+    // (3) THE ATTACK: build close_standby{closer: Financier} as a BARE ix and send
+    //     it ALONE — no SignV2 wrapper, so financier_swig_wallet_address is NOT a
+    //     signer. We do NOT patch isSigner: that's the whole point. The struct types
+    //     the swig_wallet as AccountInfo, so the tx reaches the handler and the
+    //     in-arm is_signer check reverts with FinancierConsentMissing.
+    const [standbyBacker] = deriveStandbyBackerPda(financier.swigAddress);
+    const closeIxBare = await program.methods
+      .closeStandby({
+        closer: { financier: {} },
+        clientDataJson: Buffer.from([]),
+        authenticatorData: Buffer.from([]),
+      })
+      .accountsPartial({
+        financierSwig: financier.swigAddress,
+        financierSwigWalletAddress: financier.swigWalletAddress,
+        vault: user.vaultPda,
+        standbyBacker,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY, // close_standby KEEPS this
+      })
+      .instruction();
+
+    let threw = false;
+    let errStr = "";
+    try {
+      await provider.sendAndConfirm(new Transaction().add(closeIxBare));
+    } catch (e: any) {
+      threw = true;
+      errStr = e.toString();
+    }
+    expect(
+      threw,
+      "bare close_standby{financier} (swig_wallet not a signer) should REVERT",
+    ).to.equal(true);
+    expect(errStr, "should revert with the in-arm consent check").to.match(
+      /FinancierConsentMissing/,
+    );
+
+    // (4) The close did NOT happen — standby terms intact, aggregate unchanged.
+    const userVault = await program.account.vault.fetch(user.vaultPda);
+    expect(
+      (userVault as any).standbyBacker?.toString(),
+      "standby_backer must still be set — close was rejected",
+    ).to.equal(financier.swigAddress.toString());
+    expect(
+      (userVault as any).standbyCap.toString(),
+      "standby_cap must be unchanged",
+    ).to.equal($(50).toString());
+    const backer = await program.account.standbyBacker.fetch(standbyBacker);
+    expect(
+      (backer as any).aggregatePromised.toString(),
+      "aggregate_promised must be unchanged — nothing was released",
+    ).to.equal($(50).toString());
   });
 });
 
