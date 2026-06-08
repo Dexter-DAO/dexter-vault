@@ -208,6 +208,7 @@ pub struct StandbyBacker {
     pub reserve_kind: ReserveKind,
 }
 
+/// Whether `committed_reserve` is a declared number or a program-locked balance.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
 pub enum ReserveKind {
     /// v1: financier declared a number. The "funds actually exist" check stays at
