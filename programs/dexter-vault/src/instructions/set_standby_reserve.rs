@@ -86,7 +86,14 @@ pub struct SetStandbyReserveArgs {
 pub fn handler(ctx: Context<SetStandbyReserve>, args: SetStandbyReserveArgs) -> Result<()> {
     let standby_backer = &mut ctx.accounts.standby_backer;
 
-    // Init on first call (version == 0 means freshly created by init_if_needed).
+    // First-call init. init_if_needed is safe here despite its re-init footgun:
+    // (1) the PDA is seeded by [STANDBY_BACKER_SEED, financier_swig], so the
+    //     account address is DETERMINISTIC per financier — an attacker cannot
+    //     substitute a different account at this seed.
+    // (2) this `version == 0` guard runs the init body ONLY on a freshly-created
+    //     (zeroed) account. An already-initialized ledger has version == 1, so a
+    //     second call SKIPS this block entirely — financier_swig and
+    //     aggregate_promised are NEVER reset on a live ledger (no lost-promises).
     if standby_backer.version == 0 {
         standby_backer.version = STANDBY_BACKER_VERSION_V1;
         standby_backer.bump = ctx.bumps.standby_backer;

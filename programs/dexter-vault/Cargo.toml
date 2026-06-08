@@ -21,6 +21,10 @@ custom-panic = []
 
 
 [dependencies]
+# init-if-needed enabled for set_standby_reserve's StandbyBacker PDA. This feature
+# has a known re-init footgun — any NEW use of init_if_needed must guard the init
+# body with a version/discriminator check + a deterministic PDA seed (see
+# set_standby_reserve.rs for the pattern) so a second call cannot reset state.
 anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
 anchor-spl = "0.32.1"
 solana-sha256-hasher = "2.3.0"
