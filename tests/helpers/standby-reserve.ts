@@ -37,7 +37,7 @@
 //
 // Setup flow the Task 6-9 tests run with these helpers:
 //   const fin = await enrollCreditVault(...);                       // role 1 = draw marker
-//   const programRole = await registerProgramAuthorityOnSwig({...}); // role 2
+//   const programRole = await registerProgramAuthorityOnSwig({...}); // next free role (returned, not assumed)
 
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
