@@ -51,6 +51,7 @@ import {
   ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { kitInstructionsToWeb3 } from "./register-bootstrap";
+import { enrollCreditVault } from "./credit";
 import {
   P256Keypair,
   signOperationWithPasskey,
@@ -65,6 +66,7 @@ import {
 } from "@swig-wallet/kit";
 import { Actions, createEd25519AuthorityInfo } from "@swig-wallet/lib";
 import { address as kitAddress, createSolanaRpc } from "@solana/kit";
+import { expect } from "chai";
 
 // ── (1) StandbyBacker PDA ────────────────────────────────────────────────────
 // The program's declared id (the IDL "address" field; equals program.programId).
@@ -184,6 +186,43 @@ export async function registerProgramAuthorityOnSwig(args: {
   );
 
   return newRoleIndex;
+}
+
+// ── enrollFinancierWithProgramAuthority ──────────────────────────────────────
+// Enroll a FINANCIER vault (enrollCreditVault: bootstrap V4 + draw_credit marker
+// on role 1, migrated to V5) AND register the single `Program(dexter_vault)`
+// authority on its swig (first post-enroll add → role 2). The returned
+// `programRole` authenticates the financier-leg inner-CPI SignV2 for BOTH
+// set_standby_reserve AND close_standby{financier} (mechanism B — program-scoped,
+// not per-discriminator). This is the canonical "financier that will BACK a
+// standby" setup: it replaces a bare enrollCreditVault wherever the financier
+// must then call set_standby_reserve before an openStandby.
+//
+// Hoisted from tests/standby-reserve.ts so BOTH the standby-reserve suite and the
+// credit suites (credit-antirug / credit-lifecycle) share one implementation.
+export async function enrollFinancierWithProgramAuthority(
+  program: Program<DexterVault>,
+  provider: anchor.AnchorProvider,
+  usdcFundingAmount: bigint,
+): Promise<{
+  financier: Awaited<ReturnType<typeof enrollCreditVault>>;
+  programRole: number;
+}> {
+  // FINANCIER vault — role 1 = draw_credit marker (from enroll), V5.
+  const financier = await enrollCreditVault(program, provider, {
+    usdcFundingAmount,
+  });
+
+  // Register the single Program(dexter_vault) authority on the financier swig.
+  // First post-enroll add → role 2.
+  const programRole = await registerProgramAuthorityOnSwig({
+    provider,
+    swigAddress: financier.swigAddress,
+    vaultProgramId: program.programId,
+  });
+  expect(programRole).to.equal(2);
+
+  return { financier, programRole };
 }
 
 // ── Shared inner-CPI SignV2 tail ─────────────────────────────────────────────

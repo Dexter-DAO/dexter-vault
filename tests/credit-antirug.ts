@@ -51,6 +51,12 @@ import {
   DRAW_CREDIT_DISCRIMINATOR,
   DRAW_CREDIT_MARKER_ROLE,
 } from "./helpers/credit";
+import {
+  enrollFinancierWithProgramAuthority,
+  buildSetStandbyReserveTx,
+  deriveStandbyBackerPda,
+  registerProgramAuthorityOnSwig,
+} from "./helpers/standby-reserve";
 import { enrollLockableVault, buildLockVoucherIx, buildSessionSignedVoucher } from "./lock-voucher";
 import {
   fetchSwig,
@@ -87,10 +93,13 @@ describe("draw_credit — cap guard", () => {
   it("draw past cap rejected (CreditWouldExceedStandbyCap)", async function () {
     this.timeout(600_000);
 
-    // FINANCIER vault — funds the draw. draw_credit marker on role 1, V5.
-    const financier = await enrollCreditVault(program, provider, {
-      usdcFundingAmount: 10_000_000n, // $10 available to lend
-    });
+    // FINANCIER vault — funds the draw. draw_credit marker on role 1, V5, PLUS
+    // the Program(dexter_vault) authority (role 2) needed to set a reserve.
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      10_000_000n, // $10 available to lend
+    );
 
     // USER vault — receives the standby facility. Bootstrap V4 → migrate V5.
     const user = await bootstrapForRegister(program, provider, {
@@ -107,6 +116,16 @@ describe("draw_credit — cap guard", () => {
       financier.mint,
       seller.publicKey,
     );
+
+    // Phase-1 precondition: the financier must commit a reserve (inits the
+    // StandbyBacker ledger) before any open_standby. $10 comfortably covers the
+    // $5 cap below.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financier.swigAddress,
+      financierSwigWalletAddress: financier.swigWalletAddress,
+      newReserve: 10_000_000n,
+      programRole,
+    });
 
     // User consents to a $5 standby cap backed by the financier swig.
     const cap = 5_000_000n; // $5
@@ -182,10 +201,13 @@ describe("Credit-L2 S3 — withdraw below the borrow pin rejected (WithdrawalWou
 
     const wallet = (provider.wallet as anchor.Wallet).payer;
 
-    // FINANCIER — funds the draw. draw_credit marker on role 1, V5.
-    const financier = await enrollCreditVault(program, provider, {
-      usdcFundingAmount: 10_000_000n,
-    });
+    // FINANCIER — funds the draw. draw_credit marker on role 1, V5, PLUS the
+    // Program(dexter_vault) authority (role 2) needed to set a reserve.
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      10_000_000n,
+    );
     // USER — funded $5 in its OWN swig_wallet ATA. This is the live balance the
     // pin protects. coolingOff must be 0 so finalize can run immediately;
     // bootstrapForRegister vaults default to coolingOff 0.
@@ -202,6 +224,15 @@ describe("Credit-L2 S3 — withdraw below the borrow pin rejected (WithdrawalWou
       financier.mint,
       seller.publicKey,
     );
+
+    // Phase-1 precondition: commit a reserve (inits the ledger) before
+    // open_standby. $10 covers the $5 cap.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financier.swigAddress,
+      financierSwigWalletAddress: financier.swigWalletAddress,
+      newReserve: 10_000_000n,
+      programRole,
+    });
 
     // open_standby cap = $5.
     const cap = 5_000_000n;
@@ -348,9 +379,11 @@ describe("Credit-L2 S4 — seize before deadline rejected (BorrowRecoveryTooEarl
 
     const wallet = (provider.wallet as anchor.Wallet).payer;
 
-    const financier = await enrollCreditVault(program, provider, {
-      usdcFundingAmount: 10_000_000n,
-    });
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      10_000_000n,
+    );
     // USER funded $2 so collateral exists in its swig_wallet ATA.
     const user = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: 2_000_000n,
@@ -380,6 +413,15 @@ describe("Credit-L2 S4 — seize before deadline rejected (BorrowRecoveryTooEarl
       user.mint,
       financierDest.publicKey,
     );
+
+    // Phase-1 precondition: commit a reserve (inits the ledger) before
+    // open_standby. $10 covers the $5 cap.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financier.swigAddress,
+      financierSwigWalletAddress: financier.swigWalletAddress,
+      newReserve: 10_000_000n,
+      programRole,
+    });
 
     await openStandby(program, provider, {
       userVaultPda: user.vaultPda,
@@ -472,15 +514,30 @@ describe("Credit-L2 S5 — open_standby without user consent rejected (PasskeyVe
   it("signs the open_standby op-message with a WRONG passkey; the vault rejects (no standby terms written)", async function () {
     this.timeout(600_000);
 
-    const financier = await enrollCreditVault(program, provider, {
-      usdcFundingAmount: 10_000_000n,
-    });
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      10_000_000n,
+    );
     const user = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: 0n,
     });
     await migrateVaultToV5(program, provider, user.vaultPda);
 
     const cap = 5_000_000n;
+
+    // Phase-1 precondition: commit a reserve (inits the StandbyBacker ledger) so
+    // the open_standby handler can RESOLVE+DESERIALIZE standby_backer and reach
+    // the passkey check. Without the ledger, Anchor fails at account resolution
+    // BEFORE verify_passkey_signed — and the WRONG-passkey rejection
+    // (PasskeyVerificationFailed) would never be reached. $10 covers the $5 cap.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financier.swigAddress,
+      financierSwigWalletAddress: financier.swigWalletAddress,
+      newReserve: 10_000_000n,
+      programRole,
+    });
+
     const opMsg = buildOpenStandbyMessage(
       user.vaultPda,
       financier.swigAddress,
@@ -497,6 +554,7 @@ describe("Credit-L2 S5 — open_standby without user consent rejected (PasskeyVe
       signed.signature,
       signed.precompileMessage,
     );
+    const [standbyBacker] = deriveStandbyBackerPda(financier.swigAddress);
     const openStandbyIx = await program.methods
       .openStandby({
         cap: new BN(cap.toString()),
@@ -506,6 +564,7 @@ describe("Credit-L2 S5 — open_standby without user consent rejected (PasskeyVe
       .accountsPartial({
         vault: user.vaultPda,
         financierSwig: financier.swigAddress,
+        standbyBacker,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
       .instruction();
@@ -553,18 +612,34 @@ describe("Credit-L2 S6 — consent replay binding rejected (PasskeyVerificationF
   it("a valid open_standby consent for financierA, replayed with financierB swapped in, is rejected", async function () {
     this.timeout(600_000);
 
+    // financierA is only an IDENTITY here — we sign an op-message bound to it but
+    // never open a standby against it, so it needs no reserve ledger.
     const financierA = await enrollCreditVault(program, provider, {
       usdcFundingAmount: 10_000_000n,
     });
-    const financierB = await enrollCreditVault(program, provider, {
-      usdcFundingAmount: 10_000_000n,
-    });
+    // financierB is the SWAPPED-IN backer the replay is submitted against, so the
+    // open_standby ix below resolves standby_backer from financierB's PDA. That
+    // ledger must EXIST for the handler to reach verify_passkey_signed (where the
+    // rebind mismatch surfaces as PasskeyVerificationFailed). So financierB gets
+    // the Program authority + a reserve.
+    const { financier: financierB, programRole: financierBRole } =
+      await enrollFinancierWithProgramAuthority(program, provider, 10_000_000n);
     const user = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: 0n,
     });
     await migrateVaultToV5(program, provider, user.vaultPda);
 
     const cap = 5_000_000n;
+
+    // Phase-1 precondition on financierB (the swapped-in backer): inits its
+    // ledger so the replayed open_standby reaches the passkey check. $10 covers
+    // the $5 cap.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financierB.swigAddress,
+      financierSwigWalletAddress: financierB.swigWalletAddress,
+      newReserve: 10_000_000n,
+      programRole: financierBRole,
+    });
 
     // VALID consent for financierA: sign op_msg(vault, financierA, cap).
     const opMsgA = buildOpenStandbyMessage(
@@ -586,6 +661,7 @@ describe("Credit-L2 S6 — consent replay binding rejected (PasskeyVerificationF
       signedA.signature,
       signedA.precompileMessage,
     );
+    const [standbyBackerB] = deriveStandbyBackerPda(financierB.swigAddress);
     const openStandbyIx = await program.methods
       .openStandby({
         cap: new BN(cap.toString()),
@@ -595,6 +671,7 @@ describe("Credit-L2 S6 — consent replay binding rejected (PasskeyVerificationF
       .accountsPartial({
         vault: user.vaultPda,
         financierSwig: financierB.swigAddress, // ← swapped backer
+        standbyBacker: standbyBackerB, // financierB's ledger (resolved from the swapped backer)
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
       })
       .instruction();
@@ -664,6 +741,17 @@ describe("Credit-L2 S7 — draw signed through a role lacking the draw_credit ma
     expect(wrongRole).to.equal(2);
     expect(wrongRole).to.not.equal(DRAW_CREDIT_MARKER_ROLE);
 
+    // The financier must also back a real standby (so the wrong-marker draw has
+    // a live credit line to attempt against). That needs the Program authority
+    // for set_standby_reserve. Register it AFTER the repay marker so wrongRole
+    // stays role 2 (the assertion above) — this Program authority lands on role 3.
+    const programRole = await registerProgramAuthorityOnSwig({
+      provider,
+      swigAddress: financier.swigAddress,
+      vaultProgramId: program.programId,
+    });
+    expect(programRole).to.equal(3);
+
     const user = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: 0n,
     });
@@ -676,6 +764,15 @@ describe("Credit-L2 S7 — draw signed through a role lacking the draw_credit ma
       financier.mint,
       seller.publicKey,
     );
+
+    // Phase-1 precondition: commit a reserve (inits the ledger) before
+    // open_standby. $10 covers the $5 cap.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financier.swigAddress,
+      financierSwigWalletAddress: financier.swigWalletAddress,
+      newReserve: 10_000_000n,
+      programRole,
+    });
 
     await openStandby(program, provider, {
       userVaultPda: user.vaultPda,

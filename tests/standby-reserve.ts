@@ -61,7 +61,6 @@ import {
 } from "./helpers/secp256r1";
 import { bootstrapForRegister } from "./helpers/register-bootstrap";
 import {
-  enrollCreditVault,
   migrateVaultToV5,
   openStandby,
   drawCreditAtomic,
@@ -73,7 +72,7 @@ import {
   deriveStandbyBackerPda,
   buildSetStandbyReserveTx,
   buildCloseStandbyTx,
-  registerProgramAuthorityOnSwig,
+  enrollFinancierWithProgramAuthority,
 } from "./helpers/standby-reserve";
 
 // 6-decimal token units — mirror credit-antirug's $ scaling ($1 == 1_000_000).
@@ -124,35 +123,6 @@ async function expectBackerAggregate(
 // need. The single `programRole` covers BOTH set_standby_reserve AND
 // close_standby{financier} (mechanism B — program-scoped, not per-discriminator).
 // ──────────────────────────────────────────────────────────────────────────
-interface Harness {
-  financier: Awaited<ReturnType<typeof enrollCreditVault>>;
-  programRole: number;
-}
-
-async function enrollFinancierWithProgramAuthority(
-  program: Program<DexterVault>,
-  provider: anchor.AnchorProvider,
-  usdcFundingAmount: bigint,
-): Promise<Harness> {
-  // FINANCIER vault — role 1 = draw_credit marker (from enroll), V5.
-  const financier = await enrollCreditVault(program, provider, {
-    usdcFundingAmount,
-  });
-
-  // Register the single Program(dexter_vault) authority on the financier swig.
-  // First post-enroll add → role 2. This one authority authenticates the
-  // financier-leg inner-CPI SignV2 for BOTH set_standby_reserve and
-  // close_standby{financier}.
-  const programRole = await registerProgramAuthorityOnSwig({
-    provider,
-    swigAddress: financier.swigAddress,
-    vaultProgramId: program.programId,
-  });
-  expect(programRole).to.equal(2);
-
-  return { financier, programRole };
-}
-
 // Enroll a fresh USER vault on the financier's mint (shared-mint so any draw /
 // repay SignV2 transfers in ONE token), migrated to V5.
 async function enrollUserOnMint(

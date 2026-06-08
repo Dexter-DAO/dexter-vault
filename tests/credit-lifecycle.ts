@@ -43,7 +43,6 @@ import {
 } from "./helpers/secp256r1";
 import { bootstrapForRegister } from "./helpers/register-bootstrap";
 import {
-  enrollCreditVault,
   migrateVaultToV5,
   openStandby,
   drawCreditAtomic,
@@ -54,6 +53,10 @@ import {
   SEIZE_COLLATERAL_DISCRIMINATOR,
   ataAmount,
 } from "./helpers/credit";
+import {
+  enrollFinancierWithProgramAuthority,
+  buildSetStandbyReserveTx,
+} from "./helpers/standby-reserve";
 import { enrollLockableVault } from "./lock-voucher";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -71,10 +74,13 @@ describe("Credit-L2 S2 — open → draw → repay (full lifecycle)", () => {
 
     const wallet = (provider.wallet as anchor.Wallet).payer;
 
-    // FINANCIER — funds the draw. draw_credit marker on role 1, V5.
-    const financier = await enrollCreditVault(program, provider, {
-      usdcFundingAmount: 10_000_000n,
-    });
+    // FINANCIER — funds the draw. draw_credit marker on role 1, V5, PLUS the
+    // Program(dexter_vault) authority (role 2) needed to set a reserve.
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      10_000_000n,
+    );
     // USER — funded $5 so it can later repay $3 from its OWN swig_wallet ATA.
     // CRITICAL: enroll on the FINANCIER's mint (shared mint). Credit is
     // same-token: draw moves financier→seller and repay moves user→financier,
@@ -115,6 +121,15 @@ describe("Credit-L2 S2 — open → draw → repay (full lifecycle)", () => {
       financier.mint,
       financierDest.publicKey,
     );
+
+    // Phase-1 precondition: commit a reserve (inits the StandbyBacker ledger)
+    // before open_standby. $10 covers the $5 cap.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financier.swigAddress,
+      financierSwigWalletAddress: financier.swigWalletAddress,
+      newReserve: 10_000_000n,
+      programRole,
+    });
 
     // open_standby cap = $5.
     const cap = 5_000_000n;
@@ -392,9 +407,11 @@ describe("Credit-L2 S10 — happy seize after the deadline", () => {
 
     const wallet = (provider.wallet as anchor.Wallet).payer;
 
-    const financier = await enrollCreditVault(program, provider, {
-      usdcFundingAmount: 10_000_000n,
-    });
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      10_000_000n,
+    );
     // USER funded $2 so the collateral exists in its swig_wallet ATA to be seized.
     // Shared mint (financier's): seize moves user→financier in ONE token, so
     // both vaults + all ATAs must be on the same mint (else SPL token 0x3).
@@ -428,6 +445,15 @@ describe("Credit-L2 S10 — happy seize after the deadline", () => {
       financier.mint, // shared mint (== user.mint now); the seize lands here
       financierDest.publicKey,
     );
+
+    // Phase-1 precondition: commit a reserve (inits the StandbyBacker ledger)
+    // before open_standby. $10 covers the $5 cap.
+    await buildSetStandbyReserveTx(program, provider, {
+      financierSwig: financier.swigAddress,
+      financierSwigWalletAddress: financier.swigWalletAddress,
+      newReserve: 10_000_000n,
+      programRole,
+    });
 
     await openStandby(program, provider, {
       userVaultPda: user.vaultPda,
