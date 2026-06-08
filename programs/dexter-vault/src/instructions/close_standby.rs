@@ -169,8 +169,9 @@ pub fn handler(ctx: Context<CloseStandby>, args: CloseStandbyArgs) -> Result<()>
             // backer so the signature can't be replayed against a different vault
             // or a different recorded backer.
             let vault_key = ctx.accounts.vault.key();
-            let mut op_msg = Vec::with_capacity(b"close_standby".len() + 32 + 32);
-            op_msg.extend_from_slice(b"close_standby");
+            const TAG: &[u8] = b"close_standby";
+            let mut op_msg = Vec::with_capacity(TAG.len() + 32 + 32);
+            op_msg.extend_from_slice(TAG);
             op_msg.extend_from_slice(vault_key.as_ref());
             op_msg.extend_from_slice(backer.as_ref());
 
@@ -184,9 +185,10 @@ pub fn handler(ctx: Context<CloseStandby>, args: CloseStandbyArgs) -> Result<()>
         }
         Closer::Financier => {
             // Identity: must be the vault's recorded backer (the right financier).
-            // A backer EXISTS (checked in core); this asserts the financier_swig
-            // passed matches it. StandbyBackerMismatch is the accurate variant —
-            // the close caller is the wrong financier, not "no backer configured".
+            // A backer EXISTS (resolved up front at the top of handler via
+            // ok_or(NoStandbyBacker)); this asserts the financier_swig passed
+            // matches it. StandbyBackerMismatch is the accurate variant — the
+            // close caller is the wrong financier, not "no backer configured".
             require!(
                 ctx.accounts.financier_swig.key() == backer,
                 VaultError::StandbyBackerMismatch
