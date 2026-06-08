@@ -64,8 +64,6 @@ import {
   drawCreditAtomic,
   repayCreditAtomic,
   registerMarkerOnSwig,
-  buildOpenStandbyMessage,
-  ataAmount,
   REPAY_CREDIT_DISCRIMINATOR,
 } from "./helpers/credit";
 import {
@@ -926,6 +924,12 @@ describe("Standby-reserve S8 — financier consent BINDING (mechanism B, exploit
       "set_standby_reserve routed through a role lacking the Program(vault) authority should REVERT",
     ).to.equal(true);
 
+    // ASSERTION VALIDITY (sibling to 8a's note): the coarse `threw` is acceptable
+    // here because the WRONG_ROLE route has no non-revert outcome that would still
+    // leave the ledger mutated — the getAccountInfo === null check below confirms
+    // no StandbyBacker was created on ANY path, so even if the revert arose from a
+    // different inner-CPI failure than the Program-authority refusal, the security
+    // property (no unauthorized ledger mutation) is still positively verified.
     // No ledger created via the unauthorized path.
     const [standbyBacker] = deriveStandbyBackerPda(financier.swigAddress);
     const info = await provider.connection.getAccountInfo(standbyBacker);
