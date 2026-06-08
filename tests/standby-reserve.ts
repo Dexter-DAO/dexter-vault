@@ -29,13 +29,16 @@
 //   on the first call). So every scenario calls set_standby_reserve at least once
 //   BEFORE any open_standby — that both reserves capacity AND creates the ledger.
 //
-// MARKER REGISTRATION: the financier-leg SignV2s for set_standby_reserve and
-//   close_standby authenticate via ProgramExec markers on the FINANCIER's swig.
-//   enrollCreditVault sets ONE bootstrap marker (role 1 = DRAW_CREDIT). We
-//   register two ADDITIONAL markers post-enrollment:
-//     role 2 = SET_STANDBY_RESERVE_DISCRIMINATOR
-//     role 3 = CLOSE_STANDBY_DISCRIMINATOR
-//   and pass those role indices into buildSetStandbyReserveTx / buildCloseStandbyTx.
+// PROGRAM-AUTHORITY REGISTRATION (mechanism B): the financier-leg SignV2s for
+//   set_standby_reserve and close_standby{financier} now route the vault ix as
+//   the INNER CPI of the financier swig's SignV2 — the swig_wallet PDA signs it
+//   (the rust now requires that signer). The consent is authenticated by a single
+//   `Program(dexter_vault)` authority on the FINANCIER's swig (NOT per-instruction
+//   ProgramExec markers). enrollCreditVault sets ONE bootstrap marker
+//   (role 1 = DRAW_CREDIT, still used by drawCreditAtomic). We register ONE
+//   ADDITIONAL Program authority post-enrollment via registerProgramAuthorityOnSwig
+//   → role 2, and pass that single `programRole` into BOTH buildSetStandbyReserveTx
+//   AND buildCloseStandbyTx (it's a program-scoped permission, not per-discriminator).
 
 import * as anchor from "@coral-xyz/anchor";
 import { Program, BN } from "@coral-xyz/anchor";
@@ -72,8 +75,7 @@ import {
   deriveStandbyBackerPda,
   buildSetStandbyReserveTx,
   buildCloseStandbyTx,
-  SET_STANDBY_RESERVE_DISCRIMINATOR,
-  CLOSE_STANDBY_DISCRIMINATOR,
+  registerProgramAuthorityOnSwig,
 } from "./helpers/standby-reserve";
 
 // 6-decimal token units — mirror credit-antirug's $ scaling ($1 == 1_000_000).
@@ -95,17 +97,17 @@ async function fetchBacker(
 
 // ──────────────────────────────────────────────────────────────────────────
 // Shared per-scenario harness. Mirrors credit-antirug.ts: a fresh provider +
-// program per describe. We enroll the financier + register the two extra
-// markers (set_standby_reserve role 2, close_standby role 3) on the financier
-// swig, and return everything the scenarios need.
+// program per describe. We enroll the financier + register ONE Program(vault)
+// authority on the financier swig (role 2), and return everything the scenarios
+// need. The single `programRole` covers BOTH set_standby_reserve AND
+// close_standby{financier} (mechanism B — program-scoped, not per-discriminator).
 // ──────────────────────────────────────────────────────────────────────────
 interface Harness {
   financier: Awaited<ReturnType<typeof enrollCreditVault>>;
-  setRole: number;
-  closeRole: number;
+  programRole: number;
 }
 
-async function enrollFinancierWithMarkers(
+async function enrollFinancierWithProgramAuthority(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
   usdcFundingAmount: bigint,
@@ -115,26 +117,18 @@ async function enrollFinancierWithMarkers(
     usdcFundingAmount,
   });
 
-  // Register the two ADDITIONAL financier-leg markers on the financier swig.
-  // First post-enroll add → role 2 (set_standby_reserve); second → role 3
-  // (close_standby).
-  const setRole = await registerMarkerOnSwig({
+  // Register the single Program(dexter_vault) authority on the financier swig.
+  // First post-enroll add → role 2. This one authority authenticates the
+  // financier-leg inner-CPI SignV2 for BOTH set_standby_reserve and
+  // close_standby{financier}.
+  const programRole = await registerProgramAuthorityOnSwig({
     provider,
     swigAddress: financier.swigAddress,
     vaultProgramId: program.programId,
-    discriminator: SET_STANDBY_RESERVE_DISCRIMINATOR,
   });
-  expect(setRole).to.equal(2);
+  expect(programRole).to.equal(2);
 
-  const closeRole = await registerMarkerOnSwig({
-    provider,
-    swigAddress: financier.swigAddress,
-    vaultProgramId: program.programId,
-    discriminator: CLOSE_STANDBY_DISCRIMINATOR,
-  });
-  expect(closeRole).to.equal(3);
-
-  return { financier, setRole, closeRole };
+  return { financier, programRole };
 }
 
 // Enroll a fresh USER vault on the financier's mint (shared-mint so any draw /
@@ -169,7 +163,7 @@ describe("Standby-reserve S1 — reserve ceiling (Σ ≤ committed_reserve)", ()
     this.timeout(600_000);
 
     const R = $(100); // $100 committed reserve
-    const { financier, setRole } = await enrollFinancierWithMarkers(
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
       program,
       provider,
       $(10),
@@ -180,7 +174,7 @@ describe("Standby-reserve S1 — reserve ceiling (Σ ≤ committed_reserve)", ()
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
       newReserve: R,
-      markerRole: setRole,
+      programRole,
     });
     let backer = await fetchBacker(program, financier.swigAddress);
     expect(backer.reserve).to.equal(R.toString());
@@ -244,7 +238,7 @@ describe("Standby-reserve S4 — reserve lowering down to (and below) aggregate_
 
     const R = $(100);
     const X = $(40); // promised < R
-    const { financier, setRole } = await enrollFinancierWithMarkers(
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
       program,
       provider,
       $(10),
@@ -254,7 +248,7 @@ describe("Standby-reserve S4 — reserve lowering down to (and below) aggregate_
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
       newReserve: R,
-      markerRole: setRole,
+      programRole,
     });
 
     const vault = await enrollUserOnMint(program, provider, financier.mint, 0n);
@@ -272,7 +266,7 @@ describe("Standby-reserve S4 — reserve lowering down to (and below) aggregate_
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
       newReserve: X,
-      markerRole: setRole,
+      programRole,
     });
     backer = await fetchBacker(program, financier.swigAddress);
     expect(backer.reserve).to.equal(X.toString());
@@ -284,7 +278,7 @@ describe("Standby-reserve S4 — reserve lowering down to (and below) aggregate_
         financierSwig: financier.swigAddress,
         financierSwigWalletAddress: financier.swigWalletAddress,
         newReserve: X - 1n,
-        markerRole: setRole,
+        programRole,
       });
     } catch (e: any) {
       threw = true;
@@ -318,7 +312,7 @@ describe("Standby-reserve S3 — resize delta tracking + resize-below-borrowed",
 
     const wallet = (provider.wallet as anchor.Wallet).payer;
     const R = $(200); // reserve covers the max aggregate (100)
-    const { financier, setRole } = await enrollFinancierWithMarkers(
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
       program,
       provider,
       $(100), // financier can fund the $50 draw
@@ -328,7 +322,7 @@ describe("Standby-reserve S3 — resize delta tracking + resize-below-borrowed",
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
       newReserve: R,
-      markerRole: setRole,
+      programRole,
     });
 
     const user = await enrollUserOnMint(program, provider, financier.mint, 0n);
@@ -439,21 +433,21 @@ describe("Standby-reserve S5 — block backer-change while one is set", () => {
     const C = $(50);
     const R = $(100);
 
-    const finA = await enrollFinancierWithMarkers(program, provider, $(10));
-    const finB = await enrollFinancierWithMarkers(program, provider, $(10));
+    const finA = await enrollFinancierWithProgramAuthority(program, provider, $(10));
+    const finB = await enrollFinancierWithProgramAuthority(program, provider, $(10));
 
     // Both financiers reserve capacity (also inits both ledgers).
     await buildSetStandbyReserveTx(program, provider, {
       financierSwig: finA.financier.swigAddress,
       financierSwigWalletAddress: finA.financier.swigWalletAddress,
       newReserve: R,
-      markerRole: finA.setRole,
+      programRole: finA.programRole,
     });
     await buildSetStandbyReserveTx(program, provider, {
       financierSwig: finB.financier.swigAddress,
       financierSwigWalletAddress: finB.financier.swigWalletAddress,
       newReserve: R,
-      markerRole: finB.setRole,
+      programRole: finB.programRole,
     });
 
     // User on financierA's mint (shared mint is fine — no draw here).
@@ -499,7 +493,7 @@ describe("Standby-reserve S5 — block backer-change while one is set", () => {
       vaultPda: user.vaultPda,
       financierSwig: finA.financier.swigAddress,
       financierSwigWalletAddress: finA.financier.swigWalletAddress,
-      markerRole: finA.closeRole,
+      programRole: finA.programRole,
     });
     expect(
       (await fetchBacker(program, finA.financier.swigAddress)).aggregate,
@@ -545,7 +539,7 @@ describe("Standby-reserve S2 — close lifecycle (financier leg, borrowed gate)"
     const C = $(50);
     const D = $(30);
 
-    const { financier, setRole, closeRole } = await enrollFinancierWithMarkers(
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
       program,
       provider,
       $(100),
@@ -554,7 +548,7 @@ describe("Standby-reserve S2 — close lifecycle (financier leg, borrowed gate)"
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
       newReserve: $(100),
-      markerRole: setRole,
+      programRole,
     });
 
     // USER funded so it can later repay the full $30 from its own swig_wallet ATA.
@@ -622,7 +616,7 @@ describe("Standby-reserve S2 — close lifecycle (financier leg, borrowed gate)"
         vaultPda: user.vaultPda,
         financierSwig: financier.swigAddress,
         financierSwigWalletAddress: financier.swigWalletAddress,
-        markerRole: closeRole,
+        programRole,
       });
     } catch (e: any) {
       threw = true;
@@ -662,7 +656,7 @@ describe("Standby-reserve S2 — close lifecycle (financier leg, borrowed gate)"
       vaultPda: user.vaultPda,
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
-      markerRole: closeRole,
+      programRole,
     });
     expect((await fetchBacker(program, financier.swigAddress)).aggregate).to.equal(
       "0",
@@ -692,7 +686,7 @@ describe("Standby-reserve S6 — user-callable close (the bilateral escape-hatch
     this.timeout(600_000);
 
     const C = $(50);
-    const { financier, setRole } = await enrollFinancierWithMarkers(
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
       program,
       provider,
       $(10),
@@ -701,7 +695,7 @@ describe("Standby-reserve S6 — user-callable close (the bilateral escape-hatch
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
       newReserve: $(100),
-      markerRole: setRole,
+      programRole,
     });
 
     const user = await enrollUserOnMint(program, provider, financier.mint, 0n);
@@ -739,7 +733,7 @@ describe("Standby-reserve S6 — user-callable close (the bilateral escape-hatch
     const wallet = (provider.wallet as anchor.Wallet).payer;
     const C = $(50);
     const D = $(20);
-    const { financier, setRole } = await enrollFinancierWithMarkers(
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
       program,
       provider,
       $(100),
@@ -748,7 +742,7 @@ describe("Standby-reserve S6 — user-callable close (the bilateral escape-hatch
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
       newReserve: $(100),
-      markerRole: setRole,
+      programRole,
     });
 
     const user = await enrollUserOnMint(program, provider, financier.mint, 0n);
@@ -815,42 +809,54 @@ describe("Standby-reserve S6 — user-callable close (the bilateral escape-hatch
 });
 
 // ──────────────────────────────────────────────────────────────────────────
-// Scenario 8 — financier consent via swig-authority, non-circular.
+// Scenario 8 — financier consent BINDING (mechanism B; the exploit-closed proof).
 //
-// (a) set_standby_reserve WITHOUT a valid financier-swig SignV2 authority proof
-//     → rejected. We send the set_standby_reserve VAULT ix ALONE (no paired
-//     SignV2 sibling). The handler's account-shape constraints pass, but Swig's
-//     ProgramExec consent is MISSING — there is no following SignV2 that
-//     authenticates the financier authority against the set_standby_reserve
-//     marker — so the change cannot be authorized. With no SignV2, the only
-//     "authority" over the financier swig is absent, and the ledger init/mutation
-//     never carries a valid consent proof → the tx is rejected.
+// THE FIX (commits 5b78778 / 6a52c2a): the rust now types
+// financier_swig_wallet_address as `Signer` on set_standby_reserve, and the
+// close_standby financier arm requires that signer too. The ONLY way to produce
+// that signature is to route the vault ix as the INNER CPI of the financier
+// swig's SignV2 (mechanism B), which invoke_signed's the swig_wallet PDA. There
+// is no other way to make the PDA sign. So:
 //
-//     NOTE on what's missing: the financier's consent is the [N+1] swig::SignV2
-//     whose ProgramExec marker == set_standby_reserve discriminator on the
-//     financier's swig. Sending the vault ix alone omits that consent leg.
+// (a) THE EXPLOIT, CLOSED: send set_standby_reserve as a BARE vault ix in a plain
+//     Transaction — NO SignV2 wrapper, so financier_swig_wallet_address is NOT a
+//     signer. The OLD program accepted this (the vacuous-consent bug). The fixed
+//     program types that account as `Signer`, so the runtime rejects the tx for a
+//     missing required signature BEFORE the handler runs. We assert on the REVERT
+//     (a specific custom-error string is NOT expected — this is a runtime
+//     signer-verification failure, not a handler-level Anchor error) AND that the
+//     StandbyBacker ledger was NEVER created (PDA getAccountInfo === null).
 //
-// (b) a party that does NOT control financierSwig attempts to init/mutate the
-//     StandbyBacker ledger for that financierSwig. They cannot produce the
-//     financier swig-authority proof: routing a SignV2 through a role that does
-//     NOT carry the set_standby_reserve marker (here the draw_credit marker on
-//     role 1) → Swig's ProgramExec validator finds the preceding instruction's
-//     discriminator isn't a registered marker on that role → rejected. There is
-//     no passkey field on StandbyBacker to rotate/grief (Decision 5 dissolved
-//     it), so the only assertion is: the unauthorized init reverts.
+// (b) NOT-THE-OWNER: a party who does NOT control the financier swig cannot
+//     produce the swig_wallet signer. They have no role on the financier swig
+//     carrying a Program(dexter_vault) authority to route a SignV2 through, and
+//     the bare-ix path (a) is closed for everyone. We express the tightest
+//     unauthorized path: attempt set_standby_reserve via mechanism B routed
+//     through a role index that does NOT carry the Program authority (here the
+//     draw_credit marker on role 1) — Swig's SignV2 gate refuses to authorize the
+//     inner vault CPI under a role lacking the Program(dexter_vault) permission →
+//     revert. Assert the revert AND no ledger mutation (PDA still null).
 // ──────────────────────────────────────────────────────────────────────────
-describe("Standby-reserve S8 — financier consent via swig-authority (non-circular)", () => {
+describe("Standby-reserve S8 — financier consent BINDING (mechanism B, exploit-closed)", () => {
   const provider = makeTestProvider();
   const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
   const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
 
-  it("(a) set_standby_reserve with NO paired financier SignV2 is rejected (missing financier consent)", async function () {
+  it("(a) set_standby_reserve sent as a BARE ix (no financier SignV2 → swig_wallet not a signer) REVERTS; ledger never created", async function () {
     this.timeout(600_000);
 
-    const { financier } = await enrollFinancierWithMarkers(program, provider, $(10));
+    const { financier } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      $(10),
+    );
     const [standbyBacker] = deriveStandbyBackerPda(financier.swigAddress);
 
-    // Build the vault ix ALONE — no [N+1] swig::SignV2 consent sibling.
+    // Build the vault ix and send it ALONE in a plain Transaction. The rust types
+    // financier_swig_wallet_address as `Signer`, but here it is NOT wrapped in a
+    // SignV2, so nothing invoke_signed's the swig_wallet PDA → it is not a signer.
+    // NO instructions_sysvar (the fix removed it from set_standby_reserve's
+    // accounts). The runtime rejects for a missing required signature.
     const setReserveVaultIx = await program.methods
       .setStandbyReserve({ newReserve: new BN($(100).toString()) })
       .accountsPartial({
@@ -858,7 +864,6 @@ describe("Standby-reserve S8 — financier consent via swig-authority (non-circu
         financierSwigWalletAddress: financier.swigWalletAddress,
         standbyBacker,
         feePayer: provider.wallet.publicKey,
-        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .instruction();
@@ -871,27 +876,34 @@ describe("Standby-reserve S8 — financier consent via swig-authority (non-circu
     }
     expect(
       threw,
-      "set_standby_reserve without a paired financier SignV2 should reject (no financier consent)",
+      "bare set_standby_reserve (financier swig_wallet not a signer) should REVERT — the exploit is closed",
     ).to.equal(true);
 
-    // The ledger was never created (no valid consent ever landed).
+    // The ledger was NEVER created — the missing-signer revert happens before the
+    // init/mutation. No StandbyBacker exists at the PDA.
     const info = await provider.connection.getAccountInfo(standbyBacker);
-    expect(info).to.equal(null);
+    expect(info, "no StandbyBacker ledger may exist after the rejected bare ix").to.equal(
+      null,
+    );
   });
 
-  it("(b) initializing a StandbyBacker for a financier swig you do NOT control is rejected (no swig-authority proof)", async function () {
+  it("(b) set_standby_reserve routed through a role lacking the Program(dexter_vault) authority REVERTS; ledger never created", async function () {
     this.timeout(600_000);
 
-    const { financier } = await enrollFinancierWithMarkers(program, provider, $(10));
+    const { financier } = await enrollFinancierWithProgramAuthority(
+      program,
+      provider,
+      $(10),
+    );
 
-    // Route the SignV2 through role 1 (the draw_credit marker), NOT the
-    // set_standby_reserve marker. A party lacking the set_standby_reserve
-    // authority on this swig cannot produce a SignV2 whose ProgramExec marker
-    // matches the preceding set_standby_reserve discriminator → Swig rejects
-    // (preceding-instruction-data / marker mismatch). This stands in for an
-    // attacker who does not control the financier swig's set_standby_reserve
-    // consent role.
-    const WRONG_ROLE = 1; // draw_credit marker — not set_standby_reserve
+    // Mechanism B routed through role 1 — the draw_credit ProgramExec marker, NOT
+    // the Program(dexter_vault) authority (role 2). A party lacking the Program
+    // authority on this swig cannot get Swig's SignV2 gate to authorize the inner
+    // set_standby_reserve CPI: role 1 carries no Program(dexter_vault) permission
+    // for an arbitrary inner vault ix, so invoke_signed of the swig_wallet over it
+    // is refused → revert. Stands in for an attacker who does not control the
+    // financier swig's Program-authority consent role.
+    const WRONG_ROLE = 1; // draw_credit marker — not the Program(vault) authority
 
     let threw = false;
     try {
@@ -899,20 +911,22 @@ describe("Standby-reserve S8 — financier consent via swig-authority (non-circu
         financierSwig: financier.swigAddress,
         financierSwigWalletAddress: financier.swigWalletAddress,
         newReserve: $(100),
-        markerRole: WRONG_ROLE,
+        programRole: WRONG_ROLE,
       });
     } catch (e: any) {
       threw = true;
     }
     expect(
       threw,
-      "set_standby_reserve routed through a role lacking the set_standby_reserve marker should reject",
+      "set_standby_reserve routed through a role lacking the Program(vault) authority should REVERT",
     ).to.equal(true);
 
     // No ledger created via the unauthorized path.
     const [standbyBacker] = deriveStandbyBackerPda(financier.swigAddress);
     const info = await provider.connection.getAccountInfo(standbyBacker);
-    expect(info).to.equal(null);
+    expect(info, "no StandbyBacker ledger may exist after the unauthorized route").to.equal(
+      null,
+    );
   });
 });
 
@@ -934,7 +948,7 @@ describe("Standby-reserve S9 — ceiling enforced at OPEN time (not deferred to 
     this.timeout(600_000);
 
     const R = $(75);
-    const { financier, setRole } = await enrollFinancierWithMarkers(
+    const { financier, programRole } = await enrollFinancierWithProgramAuthority(
       program,
       provider,
       $(10),
@@ -943,7 +957,7 @@ describe("Standby-reserve S9 — ceiling enforced at OPEN time (not deferred to 
       financierSwig: financier.swigAddress,
       financierSwigWalletAddress: financier.swigWalletAddress,
       newReserve: R,
-      markerRole: setRole,
+      programRole,
     });
 
     const vaultA = await enrollUserOnMint(program, provider, financier.mint, 0n);
