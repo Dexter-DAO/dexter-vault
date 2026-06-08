@@ -503,6 +503,15 @@ export async function pollUntilAccountExists(
 // Read replicas on Helius can briefly serve stale state even after a
 // `finalized` write confirmation. Use this when a test asserts a state
 // transition immediately after the tx that caused it.
+//
+// NOT-YET-VISIBLE handling: Anchor's `account.fetch()` THROWS
+// "Account does not exist or has no data" when the account isn't visible on the
+// replica yet (it does NOT return null). For a poll that reads a FRESHLY-CREATED
+// account (e.g. a just-inited PDA), that throw on the first iteration would
+// otherwise escape the loop and fail the poll — defeating the whole point. So we
+// CATCH that specific not-found error and treat it as a not-yet-ready iteration
+// (keep polling). Any OTHER error propagates immediately (we only swallow the
+// benign account-not-visible-yet case, never a real failure).
 export async function pollUntilAccount<T>(
   fetchFn: () => Promise<T>,
   predicate: (acct: T) => boolean,
@@ -511,13 +520,31 @@ export async function pollUntilAccount<T>(
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let last: T | undefined;
+  let lastNotFound = false;
   while (Date.now() < deadline) {
-    last = await fetchFn();
-    if (predicate(last)) return last;
+    try {
+      last = await fetchFn();
+      lastNotFound = false;
+      if (predicate(last)) return last;
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      // Only tolerate the account-not-yet-visible case; rethrow anything else.
+      if (
+        !msg.includes("Account does not exist") &&
+        !msg.includes("has no data")
+      ) {
+        throw err;
+      }
+      lastNotFound = true;
+    }
     await new Promise((r) => setTimeout(r, intervalMs));
   }
   throw new Error(
-    `pollUntilAccount: predicate not satisfied within ${timeoutMs}ms (last=${JSON.stringify(last)})`,
+    `pollUntilAccount: predicate not satisfied within ${timeoutMs}ms (` +
+      (lastNotFound
+        ? "account never became visible"
+        : `last=${JSON.stringify(last)}`) +
+      `)`,
   );
 }
 
