@@ -20,6 +20,7 @@ pub mod settle_locked_voucher;
 pub mod recover_abandoned_lock;
 pub mod open_standby;
 pub mod draw_credit;
+pub mod set_standby_reserve;
 pub mod repay_credit;
 pub mod seize_collateral;
 
@@ -75,6 +76,8 @@ pub use recover_abandoned_lock::*;
 pub use open_standby::*;
 #[allow(ambiguous_glob_reexports)]
 pub use draw_credit::*;
+#[allow(ambiguous_glob_reexports)]
+pub use set_standby_reserve::*;
 #[allow(ambiguous_glob_reexports)]
 pub use repay_credit::*;
 #[allow(ambiguous_glob_reexports)]

@@ -172,4 +172,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::seize_collateral::handler(ctx, args)
     }
+
+    pub fn set_standby_reserve(
+        ctx: Context<SetStandbyReserve>,
+        args: SetStandbyReserveArgs,
+    ) -> Result<()> {
+        instructions::set_standby_reserve::handler(ctx, args)
+    }
 }
