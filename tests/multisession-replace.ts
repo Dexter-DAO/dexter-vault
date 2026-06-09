@@ -252,7 +252,15 @@ describe("register_session_key — V6 replace-in-place + re-init Mode-B (spec §
       r2.toString(),
     );
 
-    // ── all four meters reset to 0 (Mode-B kill-stale-state) ──────────────────
+    // ── all four meters are 0 after the replace ───────────────────────────────
+    // NOTE (review 2026-06-09): this asserts meters are ABSENT on a fresh replace,
+    // NOT that the reset path kills STALE non-zero state. Because no settle runs
+    // between V1 and V2, the meters were already 0 going in — so this assertion
+    // would pass even if the reset code were deleted. It is NOT the Mode-B
+    // meter-reset proof. That proof (settle a tab → spent>0 → replace → assert
+    // zeroed) lives in tests/multisession-lifecycle.ts (Task 11), where the
+    // lock/settle apparatus already exists. Here we only confirm a fresh replace
+    // carries no meter exposure.
     expect(aAcct.session.spent.toString()).to.equal("0");
     expect(aAcct.session.currentOutstanding.toString()).to.equal("0");
     expect(aAcct.session.crystallizedCumulative.toString()).to.equal("0");
