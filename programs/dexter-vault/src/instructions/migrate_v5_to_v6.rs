@@ -168,14 +168,21 @@ pub fn handler(ctx: Context<MigrateV5ToV6>, _args: MigrateV5ToV6Args) -> Result<
         let mut out = Vec::with_capacity(new_size);
         out.extend_from_slice(Vault::DISCRIMINATOR);
         v6.serialize(&mut out)?;
-        // defensive: Vault is fixed-size (InitSpace), so this is unreachable unless
-        // the Borsh encoder itself is broken — guards the copy bounds below.
-        require!(out.len() == new_size, VaultError::UnsupportedVaultVersion);
+        // `Vault::INIT_SPACE` is the MAX (Option<T> counts as 1 + size_of::<T>),
+        // but Borsh serializes a `None` option as a SINGLE 0x00 byte. A real vault
+        // has None pending_withdrawal / standby_backer / borrow_recovery_at, so the
+        // encoding is SHORTER than new_size. (An earlier `== new_size` assertion here
+        // was the bug: it rejected every None-bearing vault.) Zero-PAD to exactly
+        // new_size so the post-resize tail is clean Borsh padding, never stale V5
+        // bytes — these trailing zeros deserialize as the `None` option discriminants.
+        require!(out.len() <= new_size, VaultError::UnsupportedVaultVersion);
+        out.resize(new_size, 0);
         require!(out.len() <= data.len(), VaultError::UnsupportedVaultVersion);
         data[..out.len()].copy_from_slice(&out);
     } // drop the data borrow before resize
 
-    // Shrink the account to the V6 size (resize truncates the trailing bytes).
+    // Shrink the account to the V6 size (out was padded to new_size, so the copied
+    // region IS the full V6 layout; resize just trims the leftover V5 tail).
     vault_ai.resize(new_size)?;
 
     // Refund the lamports freed by shrinking: anything above the rent-exempt
@@ -330,7 +337,12 @@ pub fn handler_with_session(
         let mut out = Vec::with_capacity(new_size);
         out.extend_from_slice(Vault::DISCRIMINATOR);
         v6.serialize(&mut out)?;
-        require!(out.len() == new_size, VaultError::UnsupportedVaultVersion);
+        // Same fix as handler(): Borsh encodes None options as 1 byte, so the
+        // V6 encoding is SHORTER than the INIT_SPACE max. Zero-pad to new_size so
+        // the post-resize tail is clean Borsh padding (the None discriminants),
+        // never stale V5 bytes. (The old `== new_size` rejected None-bearing vaults.)
+        require!(out.len() <= new_size, VaultError::UnsupportedVaultVersion);
+        out.resize(new_size, 0);
         require!(out.len() <= data.len(), VaultError::UnsupportedVaultVersion);
         data[..out.len()].copy_from_slice(&out);
     } // drop the data borrow before resize
