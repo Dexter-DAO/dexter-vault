@@ -13,3 +13,6 @@ test-ledger
 .claude/
 *.pdf
 .deploy-resume.txt
+
+# Local-only SSS security-scan baselines (analysis lives in private dexter-thesis)
+.security-baseline/
