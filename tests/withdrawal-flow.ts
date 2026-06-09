@@ -192,7 +192,7 @@ describe("withdrawal flow (request → cooling-off → finalize)", () => {
     );
 
     await program.methods
-      .settleVoucher({ amount: new BN(500), increment: true })
+      .settleVoucher({ amount: new BN(500), increment: true, allowedCounterparty: PublicKey.default })
       .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,

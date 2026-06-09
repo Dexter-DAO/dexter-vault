@@ -321,15 +321,22 @@ const runProof = process.env.RUN_MIGRATION_PROOF === "1";
 
       // (4c) THE BIT-FOR-BIT SESSION PROOF: every pre-existing session field
       //      survived the interior +12-byte growth unchanged.
-      const s = post.activeSession!;
+      // V6 NOTE: the live (V6) IDL Vault struct REMOVED `active_session`
+      // (sessions moved to per-counterparty SessionAccount PDAs), so we can no
+      // longer read the migrated V4 session via `program.account.vault.fetch`.
+      // This test migrates V3→V4; the V4 on-chain layout still carries the
+      // inline `active_session` at the same offset decodeVaultV3 reads, so we
+      // raw-decode the post-migration bytes (the honest, version-correct read)
+      // instead of going through the V6 IDL.
+      // Both sides now decode through the SAME raw V3/V4-prefix layout (hex +
+      // base58-string fields), so the bit-for-bit comparison is shape-aligned.
+      const s = decodeVaultV3(postAi!.data).activeSession!;
       const ps = pre.activeSession!;
       expect(s, "session must still be Some after migration").to.not.be.null;
-      expect(Buffer.from(s.sessionPubkey).toString("hex")).to.equal(
-        ps.sessionPubkeyHex
-      );
+      expect(s.sessionPubkeyHex).to.equal(ps.sessionPubkeyHex);
       expect(s.maxAmount.toString()).to.equal(ps.maxAmount.toString());
       expect(s.expiresAt.toString()).to.equal(ps.expiresAt.toString());
-      expect(s.allowedCounterparty.toBase58()).to.equal(ps.allowedCounterparty);
+      expect(s.allowedCounterparty).to.equal(ps.allowedCounterparty);
       expect(s.nonce).to.equal(ps.nonce);
       expect(s.spent.toString()).to.equal(ps.spent.toString());
       expect(s.currentOutstanding.toString()).to.equal(
@@ -339,14 +346,25 @@ const runProof = process.env.RUN_MIGRATION_PROOF === "1";
         ps.maxRevolvingCapacity.toString()
       );
 
-      // (4d) the 2 new session fields = 0 (legacy session never locked).
-      expect(s.crystallizedCumulative.toString()).to.equal("0");
-      expect(s.lastLockedSequence).to.equal(0);
+      // (4d) the 2 new V4 session fields = 0 (legacy session never locked).
+      // decodeVaultV3 stops before these appended fields, so read them inline
+      // from the raw V4 bytes. With-session layout: the session block sits after
+      // the 1-byte Some tag; the 2 new u64/u32 fields are the last 12 bytes of
+      // the SessionRegistration (crystallized_cumulative u64 || last_locked u32),
+      // i.e. the 12 bytes immediately preceding the 3 vault-scope odometers.
+      // EXPECTED_V4_SIZE - 3*8 (the 3 trailing u64 odometers) = end of session.
+      const sessEnd = EXPECTED_V4_SIZE - 3 * 8;
+      const crystallizedCumulative = postAi!.data.readBigUInt64LE(sessEnd - 12);
+      const lastLockedSequence = postAi!.data.readUInt32LE(sessEnd - 4);
+      expect(crystallizedCumulative.toString()).to.equal("0");
+      expect(lastLockedSequence).to.equal(0);
 
       // (4e) the 3 new vault-scope odometers = 0 (no lock accounting yet).
-      expect(post.outstandingLockedAmount.toString()).to.equal("0");
-      expect(post.totalCrystallizedAmount.toString()).to.equal("0");
-      expect(post.totalSettledAmount.toString()).to.equal("0");
+      // Raw-read from the V4 tail (the V6 IDL would misalign these on a V4
+      // account, since V6 removed inline active_session from the struct).
+      expect(postAi!.data.readBigUInt64LE(EXPECTED_V4_SIZE - 24).toString()).to.equal("0");
+      expect(postAi!.data.readBigUInt64LE(EXPECTED_V4_SIZE - 16).toString()).to.equal("0");
+      expect(postAi!.data.readBigUInt64LE(EXPECTED_V4_SIZE - 8).toString()).to.equal("0");
     });
 
     it("None-session vault: prefix preserved, version bumped, 3 vault fields = 0, no session", async () => {
@@ -395,13 +413,15 @@ const runProof = process.env.RUN_MIGRATION_PROOF === "1";
       );
       expect(post.dexterAuthority.toBase58()).to.equal(pre.dexterAuthority);
 
-      // (4c) still no session.
-      expect(post.activeSession).to.be.null;
+      // (4c) still no session. V6 NOTE: read via raw V4-layout decode rather
+      // than the V6 IDL (which removed `active_session` from the Vault struct).
+      expect(decodeVaultV3(postAi!.data).activeSession).to.be.null;
 
-      // (4d) the 3 new vault-scope odometers = 0.
-      expect(post.outstandingLockedAmount.toString()).to.equal("0");
-      expect(post.totalCrystallizedAmount.toString()).to.equal("0");
-      expect(post.totalSettledAmount.toString()).to.equal("0");
+      // (4d) the 3 new vault-scope odometers = 0. Raw-read from the V4 tail
+      // (the V6 IDL would misalign these on a V4 account).
+      expect(postAi!.data.readBigUInt64LE(EXPECTED_V4_SIZE - 24).toString()).to.equal("0");
+      expect(postAi!.data.readBigUInt64LE(EXPECTED_V4_SIZE - 16).toString()).to.equal("0");
+      expect(postAi!.data.readBigUInt64LE(EXPECTED_V4_SIZE - 8).toString()).to.equal("0");
     });
   }
 );

@@ -141,8 +141,19 @@ describe("drain-attempt (adversarial)", () => {
     );
 
     // 1. Open streaming session — pending_voucher_count = 1.
+    // V6 MIGRATION NOTE (run-phase): this test provisions a bare V4 vault and
+    // uses settle_voucher purely as a gate-counter primitive. Under V6 the
+    // increment path gates on VAULT_VERSION_V6 and REQUIRES a per-counterparty
+    // session PDA — neither exists here, so this call will revert at run-time
+    // (UnsupportedVaultVersion / NoActiveSession). `allowedCounterparty` is
+    // threaded only to satisfy the V6 IDL arg shape; making this test actually
+    // run on V6 needs a full V6 + session bootstrap (flagged, not done here).
     await program.methods
-      .settleVoucher({ amount: new BN(2_000), increment: true })
+      .settleVoucher({
+        amount: new BN(2_000),
+        increment: true,
+        allowedCounterparty: PublicKey.default,
+      })
       .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
@@ -189,9 +200,14 @@ describe("drain-attempt (adversarial)", () => {
       expect(v.pendingWithdrawal).to.not.be.null;
     }
 
-    // 5. Dexter settles. Voucher count → 0.
+    // 5. Dexter settles. Voucher count → 0. (close path: no session needed,
+    //    but still V6-gated — see the run-phase note above.)
     await program.methods
-      .settleVoucher({ amount: new BN(2_000), increment: false })
+      .settleVoucher({
+        amount: new BN(2_000),
+        increment: false,
+        allowedCounterparty: PublicKey.default,
+      })
       .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,

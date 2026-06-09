@@ -54,7 +54,7 @@ async function setupLockedClaim(args: {
     maxRevolvingCapacity: 2_000_000n,
   });
 
-  await openTab(program, provider, ctx.vaultPda, 1_000_000n);
+  await openTab(program, provider, ctx.vaultPda, 1_000_000n, ctx.allowedCounterparty, ctx.sessionPda);
 
   const voucher = buildSessionSignedVoucher({
     sessionKeypair: ctx.sessionKeypair,
@@ -75,6 +75,8 @@ async function setupLockedClaim(args: {
     payer: provider.wallet.publicKey,
     maturityAt: null,
     holderRecoveryAt: null,
+    allowedCounterparty: ctx.allowedCounterparty,
+    sessionPda: ctx.sessionPda,
   });
 
   const tx = new Transaction().add(voucher.precompileIx, lockIx);

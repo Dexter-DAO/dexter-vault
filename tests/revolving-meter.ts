@@ -96,6 +96,10 @@ interface LeanVaultContext {
   sessionKeypair: Keypair;
   /** Stable per-vault channel id (parity with the heavy context). */
   channelId: Uint8Array;
+  /** V6: counterparty the session is bound to + per-counterparty SessionAccount
+   *  PDA (the session moved off vault.active_session in V6). */
+  allowedCounterparty: PublicKey;
+  sessionPda: PublicKey;
 }
 
 /**
@@ -127,11 +131,16 @@ async function registerSessionWithCapacity(
   // Fund well above maxAmount so the gate passes by a wide margin.
   const usdcFundingAmount = maxAmount * 4n + 1_000_000n;
 
+  // V6: settle_voucher's increment path gates on VAULT_VERSION_V6 and needs the
+  // per-counterparty SessionAccount PDA — migrate to V6 + pin a counterparty.
   const bootstrap = await bootstrapForRegister(program, provider, {
     usdcFundingAmount,
+    migrateTo: 6,
   });
 
-  const { sessionKeypair } = await registerSessionV2(program, provider, {
+  const allowedCounterparty = Keypair.generate().publicKey;
+
+  const { sessionKeypair, sessionPda } = await registerSessionV2(program, provider, {
     vaultPda: bootstrap.vaultPda,
     passkey: bootstrap.passkey,
     vaultUsdcAta: bootstrap.sourceAta,
@@ -139,12 +148,19 @@ async function registerSessionWithCapacity(
     swigWalletAddress: bootstrap.swigWalletAddress,
     maxAmount,
     maxRevolvingCapacity,
+    allowedCounterparty,
   });
 
   const channelId = new Uint8Array(32);
   crypto.getRandomValues(channelId);
 
-  return { vaultPda: bootstrap.vaultPda, sessionKeypair, channelId };
+  return {
+    vaultPda: bootstrap.vaultPda,
+    sessionKeypair,
+    channelId,
+    allowedCounterparty,
+    sessionPda,
+  };
 }
 
 describe("revolving-meter: registration", () => {
@@ -157,10 +173,11 @@ describe("revolving-meter: registration", () => {
   const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
   const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
   it("stores max_revolving_capacity, zeroes current_outstanding", async () => {
-    const { vaultPda } = await registerSessionWithCapacity(program, provider, {
+    const ctx = await registerSessionWithCapacity(program, provider, {
       maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
     });
-    const s = (await program.account.vault.fetch(vaultPda)).activeSession;
+    // V6: session state lives on the per-counterparty SessionAccount PDA.
+    const s = (await program.account.sessionAccount.fetch(ctx.sessionPda)).session;
     expect(s.maxRevolvingCapacity.toNumber()).to.equal(2_000_000);
     expect(s.currentOutstanding.toNumber()).to.equal(0);
     expect(s.spent.toNumber()).to.equal(0);
@@ -176,11 +193,21 @@ async function open(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
   vaultPda: PublicKey,
-  amount: number
+  amount: number,
+  allowedCounterparty: PublicKey,
+  sessionPda: PublicKey
 ): Promise<void> {
   await program.methods
-    .settleVoucher({ amount: new anchor.BN(amount), increment: true })
-    .accountsPartial({ vault: vaultPda, dexterAuthority: provider.wallet.publicKey })
+    .settleVoucher({
+      amount: new anchor.BN(amount),
+      increment: true,
+      allowedCounterparty,
+    })
+    .accountsPartial({
+      vault: vaultPda,
+      session: sessionPda,
+      dexterAuthority: provider.wallet.publicKey,
+    })
     .rpc();
 }
 
@@ -193,20 +220,20 @@ describe("revolving-meter: open captures exposure", () => {
   const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
   const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
   it("settle_voucher(increment) raises current_outstanding by amount", async () => {
-    const { vaultPda } = await registerSessionWithCapacity(program, provider, {
+    const ctx = await registerSessionWithCapacity(program, provider, {
       maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
     });
-    await open(program, provider, vaultPda, 1_000_000);
-    const s = (await program.account.vault.fetch(vaultPda)).activeSession;
+    await open(program, provider, ctx.vaultPda, 1_000_000, ctx.allowedCounterparty, ctx.sessionPda);
+    const s = (await program.account.sessionAccount.fetch(ctx.sessionPda)).session;
     expect(s.currentOutstanding.toNumber()).to.equal(1_000_000);
   });
   it("rejects an open that exceeds max_revolving_capacity", async () => {
-    const { vaultPda } = await registerSessionWithCapacity(program, provider, {
+    const ctx = await registerSessionWithCapacity(program, provider, {
       maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
     });
-    await open(program, provider, vaultPda, 2_000_000);
+    await open(program, provider, ctx.vaultPda, 2_000_000, ctx.allowedCounterparty, ctx.sessionPda);
     let threw = false;
-    try { await open(program, provider, vaultPda, 1); }
+    try { await open(program, provider, ctx.vaultPda, 1, ctx.allowedCounterparty, ctx.sessionPda); }
     catch (e: any) { threw = true; expect(e.toString()).to.match(/RevolvingCapacityExceeded/); }
     expect(threw).to.equal(true);
   });
@@ -224,9 +251,9 @@ describe("revolving-meter: settle releases exposure", () => {
     const ctx = await registerSettleableVault(program, provider, {
       maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
     });
-    await open(program, provider, ctx.vaultPda, 1_000_000);
+    await open(program, provider, ctx.vaultPda, 1_000_000, ctx.allowedCounterparty, ctx.sessionPda);
     await settle(program, provider, ctx.vaultPda, 1_000_000, ctx);
-    const s = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
+    const s = (await program.account.sessionAccount.fetch(ctx.sessionPda)).session;
     expect(s.currentOutstanding.toNumber()).to.equal(0);
     expect(s.spent.toNumber()).to.equal(1_000_000);
   });
@@ -240,11 +267,15 @@ describe("revolving-meter: version", () => {
   // txs (initialize_vault + register_session_key) and must use the test provider.
   const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
   const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
-  it("fresh vault is V3", async () => {
+  it("registerSessionWithCapacity vault is V6", async () => {
+    // V6: registerSessionWithCapacity now migrates the vault to V6 (the
+    // settle_voucher increment path gates on VAULT_VERSION_V6). The old
+    // "fresh vault is V3" assertion no longer holds — the bootstrap migrates
+    // V4 → V5 → V6 before registration.
     const ctx = await registerSessionWithCapacity(program, provider, {
       maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
     });
-    expect((await program.account.vault.fetch(ctx.vaultPda)).version).to.equal(3);
+    expect((await program.account.vault.fetch(ctx.vaultPda)).version).to.equal(6);
   });
 });
 
@@ -321,8 +352,9 @@ describe("turnover-demo: credex proof (turnover > 1)", () => {
     let cumulative = 0;
     for (let i = 1; i <= ROUNDS; i++) {
       // OPEN: settle_voucher(increment) raises current_outstanding by CLAIM
-      await open(program, provider, ctx.vaultPda, CLAIM);
-      let s = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
+      await open(program, provider, ctx.vaultPda, CLAIM, ctx.allowedCounterparty, ctx.sessionPda);
+      // V6: session state lives on the per-counterparty SessionAccount PDA.
+      let s = (await program.account.sessionAccount.fetch(ctx.sessionPda)).session;
       const outAfterOpen = s.currentOutstanding.toNumber();
 
       // SETTLE: settle_tab_voucher with the running cumulative total.
@@ -330,7 +362,7 @@ describe("turnover-demo: credex proof (turnover > 1)", () => {
       // current_outstanding back down.
       cumulative += CLAIM;
       await settle(program, provider, ctx.vaultPda, cumulative, ctx, { sequenceNumber: i });
-      s = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
+      s = (await program.account.sessionAccount.fetch(ctx.sessionPda)).session;
       console.log(
         `round ${String(i).padStart(2)}: open->outstanding=$${outAfterOpen / 1e6}  ` +
         `settle->outstanding=$${s.currentOutstanding.toNumber() / 1e6}  ` +
@@ -338,7 +370,7 @@ describe("turnover-demo: credex proof (turnover > 1)", () => {
       );
     }
 
-    const s = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
+    const s = (await program.account.sessionAccount.fetch(ctx.sessionPda)).session;
     const settled = s.spent.toNumber();
     const capacity = s.maxRevolvingCapacity.toNumber();
     const turnover = settled / capacity;

@@ -75,6 +75,11 @@ async function lockAndRevoke(args: {
   swigAddress: PublicKey;
   swigWalletAddress: PublicKey;
   sourceAta: PublicKey;
+  /** V6: counterparty the session is bound to + the per-counterparty
+   *  SessionAccount PDA (the session moved off vault.active_session in V6).
+   *  settle_voucher / lock_voucher / revoke_session_key all need both. */
+  allowedCounterparty: PublicKey;
+  sessionPda: PublicKey;
   /** Both the open-tab amount and the voucher's cumulative_amount.
    *  After lock, vault.outstanding_locked_amount = amount. */
   amount: bigint;
@@ -88,6 +93,8 @@ async function lockAndRevoke(args: {
     swigAddress,
     swigWalletAddress,
     sourceAta,
+    allowedCounterparty,
+    sessionPda,
     amount,
   } = args;
 
@@ -96,9 +103,11 @@ async function lockAndRevoke(args: {
     .settleVoucher({
       amount: new anchor.BN(amount.toString()),
       increment: true,
+      allowedCounterparty,
     })
     .accountsPartial({
       vault: vaultPda,
+      session: sessionPda,
       dexterAuthority: provider.wallet.publicKey,
     })
     .rpc();
@@ -137,12 +146,14 @@ async function lockAndRevoke(args: {
       voucherHash: Array.from(voucherHash),
       maturityAt: null,
       holderRecoveryAt: null,
+      allowedCounterparty,
     })
     .accountsPartial({
       vault: vaultPda,
       vaultUsdcAta: sourceAta,
       swig: swigAddress,
       swigWalletAddress,
+      session: sessionPda,
       claim: claimPda,
       sellerHolder: provider.wallet.publicKey,
       dexterAuthority: provider.wallet.publicKey,
@@ -172,11 +183,13 @@ async function lockAndRevoke(args: {
   );
   const revokeIx = await program.methods
     .revokeSessionKey({
+      allowedCounterparty,
       clientDataJson: Buffer.from(revokeSigned.clientDataJSON),
       authenticatorData: Buffer.from(revokeSigned.authenticatorData),
     })
     .accountsPartial({
       vault: vaultPda,
+      session: sessionPda,
       instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
     })
     .instruction();
@@ -205,6 +218,7 @@ describe("register_session_key — overcommit gate (V0.3 Decision 1, Task 8)", (
 
     const bootstrap = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: FUND,
+      migrateTo: 6,
     });
 
     const first = await registerSessionV2(program, provider, {
@@ -226,6 +240,8 @@ describe("register_session_key — overcommit gate (V0.3 Decision 1, Task 8)", (
       swigAddress: bootstrap.swigAddress,
       swigWalletAddress: bootstrap.swigWalletAddress,
       sourceAta: bootstrap.sourceAta,
+      allowedCounterparty: first.allowedCounterparty,
+      sessionPda: first.sessionPda,
       amount: LOCK_AMOUNT,
     });
 
@@ -257,6 +273,7 @@ describe("register_session_key — overcommit gate (V0.3 Decision 1, Task 8)", (
 
     const bootstrap = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: FUND,
+      migrateTo: 6,
     });
 
     const first = await registerSessionV2(program, provider, {
@@ -278,6 +295,8 @@ describe("register_session_key — overcommit gate (V0.3 Decision 1, Task 8)", (
       swigAddress: bootstrap.swigAddress,
       swigWalletAddress: bootstrap.swigWalletAddress,
       sourceAta: bootstrap.sourceAta,
+      allowedCounterparty: first.allowedCounterparty,
+      sessionPda: first.sessionPda,
       amount: LOCK_AMOUNT,
     });
 

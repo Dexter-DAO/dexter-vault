@@ -416,6 +416,11 @@ export interface RegisteredSession {
   /** The per-counterparty session PDA this registration wrote (V6). Tests
    *  fetch `program.account.sessionAccount.fetch(sessionPda)` to assert. */
   sessionPda: PublicKey;
+  /** V6: the counterparty this session was registered against (the default is
+   *  a fresh random key when `opts.allowedCounterparty` is omitted). Callers
+   *  that later drive settle/lock/revoke against this session need it to pass
+   *  `allowedCounterparty` in the args + re-derive the session PDA seed. */
+  allowedCounterparty: PublicKey;
 }
 
 export async function registerSessionV2(
@@ -504,5 +509,5 @@ export async function registerSessionV2(
     },
   );
   const signature = sig ?? "";
-  return { sessionKeypair, signature, sessionPda };
+  return { sessionKeypair, signature, sessionPda, allowedCounterparty };
 }

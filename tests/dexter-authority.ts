@@ -87,7 +87,7 @@ describe("dexter_authority (Findings B + A)", () => {
   it("settle_voucher SUCCEEDS for the bound authority", async () => {
     const { vaultPda } = await provisionVault(0);
     await program.methods
-      .settleVoucher({ amount: new BN(1_000_000), increment: true })
+      .settleVoucher({ amount: new BN(1_000_000), increment: true, allowedCounterparty: PublicKey.default })
       .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
       .signers([authority])
       .rpc();
@@ -103,7 +103,7 @@ describe("dexter_authority (Findings B + A)", () => {
     let threw = false;
     try {
       await program.methods
-        .settleVoucher({ amount: new BN(1_000_000), increment: false })
+        .settleVoucher({ amount: new BN(1_000_000), increment: false, allowedCounterparty: PublicKey.default })
         .accountsPartial({ vault: vaultPda, dexterAuthority: attacker.publicKey })
         .signers([attacker])
         .rpc();
@@ -222,7 +222,7 @@ describe("dexter_authority (Findings B + A)", () => {
     const swig = await bindSwig(vaultPda, keypair);
     // Stick the count (authority opens a tab).
     await program.methods
-      .settleVoucher({ amount: new BN(1_000_000), increment: true })
+      .settleVoucher({ amount: new BN(1_000_000), increment: true, allowedCounterparty: PublicKey.default })
       .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
       .signers([authority])
       .rpc();
@@ -252,7 +252,7 @@ describe("dexter_authority (Findings B + A)", () => {
     const { vaultPda, keypair } = await provisionVault(0);
     const swig = await bindSwig(vaultPda, keypair);
     await program.methods
-      .settleVoucher({ amount: new BN(1_000_000), increment: true })
+      .settleVoucher({ amount: new BN(1_000_000), increment: true, allowedCounterparty: PublicKey.default })
       .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
       .signers([authority])
       .rpc();

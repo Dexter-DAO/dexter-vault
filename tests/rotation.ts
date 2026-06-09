@@ -147,7 +147,7 @@ describe("key rotation", () => {
     let threw = false;
     try {
       await program.methods
-        .settleVoucher({ amount: new BN(1), increment: true })
+        .settleVoucher({ amount: new BN(1), increment: true, allowedCounterparty: PublicKey.default })
         .accountsPartial({ vault: vaultPda, dexterAuthority: authority.publicKey })
         .signers([authority])
         .rpc();

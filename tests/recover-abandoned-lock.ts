@@ -143,6 +143,10 @@ interface EnrolledVault {
   mint: PublicKey;
   sourceAta: PublicKey;
   decimals: number;
+  /** V6: counterparty the session is bound to + the per-counterparty
+   *  SessionAccount PDA (session moved off vault.active_session in V6). */
+  allowedCounterparty: PublicKey;
+  sessionPda: PublicKey;
 }
 
 /**
@@ -163,11 +167,16 @@ async function enrollVault(
   // register_session_key. The bootstrap helper handles the pre-step; then we
   // register with the funded ATA in scope so the gate `combined ≤ amount`
   // holds.
+  // V6: settle_voucher / lock_voucher gate on VAULT_VERSION_V6 and operate on
+  // the per-counterparty SessionAccount PDA — migrate to V6 + pin a counterparty.
   const bootstrap = await bootstrapForRegister(program, provider, {
     usdcFundingAmount,
+    migrateTo: 6,
   });
 
-  const { sessionKeypair } = await registerSessionV2(program, provider, {
+  const allowedCounterparty = Keypair.generate().publicKey;
+
+  const { sessionKeypair, sessionPda } = await registerSessionV2(program, provider, {
     vaultPda: bootstrap.vaultPda,
     passkey: bootstrap.passkey,
     vaultUsdcAta: bootstrap.sourceAta,
@@ -175,6 +184,7 @@ async function enrollVault(
     swigWalletAddress: bootstrap.swigWalletAddress,
     maxAmount,
     maxRevolvingCapacity,
+    allowedCounterparty,
   });
 
   const channelId = bootstrap.vaultPda.toBytes();
@@ -189,6 +199,8 @@ async function enrollVault(
     mint: bootstrap.mint,
     sourceAta: bootstrap.sourceAta,
     decimals: bootstrap.decimals,
+    allowedCounterparty,
+    sessionPda,
   };
 }
 
@@ -202,11 +214,21 @@ async function openTab(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
   vaultPda: PublicKey,
-  amount: bigint
+  amount: bigint,
+  allowedCounterparty: PublicKey,
+  sessionPda: PublicKey
 ): Promise<void> {
   await program.methods
-    .settleVoucher({ amount: new anchor.BN(amount.toString()), increment: true })
-    .accountsPartial({ vault: vaultPda, dexterAuthority: provider.wallet.publicKey })
+    .settleVoucher({
+      amount: new anchor.BN(amount.toString()),
+      increment: true,
+      allowedCounterparty,
+    })
+    .accountsPartial({
+      vault: vaultPda,
+      session: sessionPda,
+      dexterAuthority: provider.wallet.publicKey,
+    })
     .rpc();
 }
 
@@ -222,7 +244,7 @@ async function lockOneDollar(args: {
   holderRecoveryAt: bigint | null;
 }): Promise<LockedVoucherResult> {
   const { program, provider, ctx, holderRecoveryAt } = args;
-  await openTab(program, provider, ctx.vaultPda, 1_000_000n);
+  await openTab(program, provider, ctx.vaultPda, 1_000_000n, ctx.allowedCounterparty, ctx.sessionPda);
 
   const message = voucherPayloadMessage(ctx.channelId, 1_000_000n, 1);
   const precompileIx = Ed25519Program.createInstructionWithPrivateKey({
@@ -246,12 +268,14 @@ async function lockOneDollar(args: {
       holderRecoveryAt: holderRecoveryAt === null
         ? null
         : new anchor.BN(holderRecoveryAt.toString()),
+      allowedCounterparty: ctx.allowedCounterparty,
     })
     .accountsPartial({
       vault: ctx.vaultPda,
       vaultUsdcAta: ctx.sourceAta,
       swig: ctx.swigAddress,
       swigWalletAddress: ctx.swigWalletAddress,
+      session: ctx.sessionPda,
       claim: claimPda,
       sellerHolder: provider.wallet.publicKey,
       dexterAuthority: provider.wallet.publicKey,

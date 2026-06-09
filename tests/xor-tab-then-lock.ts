@@ -37,7 +37,7 @@ describe("XOR Test 2 — settle-then-lock rejected via frontier guard", () => {
       maxRevolvingCapacity: 2_000_000n,
     });
 
-    await openTab(program, provider, ctx.vaultPda, 1_000_000n);
+    await openTab(program, provider, ctx.vaultPda, 1_000_000n, ctx.allowedCounterparty, ctx.sessionPda);
 
     const voucher = buildSessionSignedVoucher({
       sessionKeypair: ctx.sessionKeypair,
@@ -65,6 +65,8 @@ describe("XOR Test 2 — settle-then-lock rejected via frontier guard", () => {
       payer: provider.wallet.publicKey,
       maturityAt: null,
       holderRecoveryAt: null,
+      allowedCounterparty: ctx.allowedCounterparty,
+      sessionPda: ctx.sessionPda,
     });
 
     let threw = false;

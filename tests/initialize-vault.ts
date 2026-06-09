@@ -51,6 +51,11 @@ describe("initialize_vault (v2)", () => {
     expect(vault.pendingWithdrawal).to.be.null;
     expect(Buffer.from(vault.identityClaim)).to.deep.equal(Buffer.from(identityClaim));
     expect(vault.dexterAuthority.toBase58()).to.equal(dexterAuthority.publicKey.toBase58());
-    expect(vault.activeSession).to.be.null;
+    // V6 MIGRATION NOTE: the V6 Vault struct REMOVED `active_session` (sessions
+    // moved to per-counterparty SessionAccount PDAs). initialize_vault still
+    // writes a V4 vault, so there is no V6 `live_session_count` on this account
+    // to read either — the "fresh vault has no session" intent is already
+    // covered by `pendingVoucherCount == 0` above. The removed-field assertion
+    // is dropped rather than faked.
   });
 });

@@ -168,6 +168,10 @@ interface LockableVaultContext {
   sellerAta: PublicKey;
   sellerOwner: PublicKey;
   decimals: number;
+  /** V6: counterparty the session is bound to + the per-counterparty
+   *  SessionAccount PDA (the session moved off vault.active_session in V6). */
+  allowedCounterparty: PublicKey;
+  sessionPda: PublicKey;
 }
 
 interface EnrollOpts {
@@ -198,11 +202,17 @@ async function enrollLockableVault(
   // order is: initialize_vault → swig create/add/set → fund ATA → register.
   // The bootstrap helper handles the pre-step; we then register against the
   // funded ATA so the gate `maxAmount + 0 ≤ funding` holds trivially.
+  // V6: settle_voucher / lock_voucher / settle_tab_voucher gate on
+  // VAULT_VERSION_V6 and operate on the per-counterparty SessionAccount PDA, so
+  // migrate the vault to V6 and pin an explicit counterparty.
   const bootstrap = await bootstrapForRegister(program, provider, {
     usdcFundingAmount: opts.usdcFundingAmount,
+    migrateTo: 6,
   });
 
-  const { sessionKeypair } = await registerSessionV2(program, provider, {
+  const allowedCounterparty = Keypair.generate().publicKey;
+
+  const { sessionKeypair, sessionPda } = await registerSessionV2(program, provider, {
     vaultPda: bootstrap.vaultPda,
     passkey: bootstrap.passkey,
     vaultUsdcAta: bootstrap.sourceAta,
@@ -210,6 +220,7 @@ async function enrollLockableVault(
     swigWalletAddress: bootstrap.swigWalletAddress,
     maxAmount: opts.maxAmount,
     maxRevolvingCapacity: opts.maxRevolvingCapacity,
+    allowedCounterparty,
   });
 
   const sellerOwner = Keypair.generate().publicKey;
@@ -237,19 +248,32 @@ async function enrollLockableVault(
     sellerAta,
     sellerOwner,
     decimals: bootstrap.decimals,
+    allowedCounterparty,
+    sessionPda,
   };
 }
 
-// settle_voucher(increment=true, amount=X) — credex meter RISE seam.
+// settle_voucher(increment=true, amount=X) — credex meter RISE seam. V6: the
+// increment path requires the per-counterparty session PDA + allowedCounterparty.
 async function openTab(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
   vaultPda: PublicKey,
-  amount: bigint
+  amount: bigint,
+  allowedCounterparty: PublicKey,
+  sessionPda: PublicKey
 ): Promise<void> {
   await program.methods
-    .settleVoucher({ amount: new anchor.BN(amount.toString()), increment: true })
-    .accountsPartial({ vault: vaultPda, dexterAuthority: provider.wallet.publicKey })
+    .settleVoucher({
+      amount: new anchor.BN(amount.toString()),
+      increment: true,
+      allowedCounterparty,
+    })
+    .accountsPartial({
+      vault: vaultPda,
+      session: sessionPda,
+      dexterAuthority: provider.wallet.publicKey,
+    })
     .rpc();
 }
 
@@ -300,6 +324,8 @@ async function buildLockVoucherIx(args: {
   payer: PublicKey;
   maturityAt: bigint | null;
   holderRecoveryAt: bigint | null;
+  allowedCounterparty: PublicKey;
+  sessionPda: PublicKey;
 }): Promise<TransactionInstruction> {
   const [claimPda] = PublicKey.findProgramAddressSync(
     [
@@ -322,12 +348,14 @@ async function buildLockVoucherIx(args: {
       holderRecoveryAt: args.holderRecoveryAt === null
         ? null
         : new anchor.BN(args.holderRecoveryAt.toString()),
+      allowedCounterparty: args.allowedCounterparty,
     })
     .accountsPartial({
       vault: args.vaultPda,
       vaultUsdcAta: args.vaultUsdcAta,
       swig: args.swigAddress,
       swigWalletAddress: args.swigWalletAddress,
+      session: args.sessionPda,
       claim: claimPda,
       sellerHolder: args.sellerHolder,
       dexterAuthority: args.dexterAuthority,
@@ -354,8 +382,12 @@ async function settleTabAtomic(args: {
   const rpc = createSolanaRpc(connection.rpcEndpoint);
 
   // Read live `spent` to compute the increment, just like revolving-meter.
-  const session = (await program.account.vault.fetch(ctx.vaultPda)).activeSession;
-  if (!session) throw new Error("vault has no active session");
+  // V6: read from the per-counterparty SessionAccount PDA.
+  const sessionAcct = await program.account.sessionAccount.fetch(ctx.sessionPda);
+  if (!sessionAcct || sessionAcct.version === 0) {
+    throw new Error("vault has no live session");
+  }
+  const session = sessionAcct.session;
   const priorSpent = BigInt(session.spent.toString());
   if (voucher.cumulativeAmount <= priorSpent) {
     throw new Error(
@@ -369,11 +401,13 @@ async function settleTabAtomic(args: {
       channelId: Array.from(ctx.channelId),
       cumulativeAmount: new anchor.BN(voucher.cumulativeAmount.toString()),
       sequenceNumber: voucher.sequenceNumber,
+      allowedCounterparty: ctx.allowedCounterparty,
     })
     .accountsPartial({
       swig: ctx.swigAddress,
       swigWalletAddress: ctx.swigWalletAddress,
       vault: ctx.vaultPda,
+      session: ctx.sessionPda,
       dexterAuthority: provider.wallet.publicKey,
       instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
     })
@@ -428,7 +462,7 @@ describe("lock_voucher — happy path", () => {
       maxRevolvingCapacity: 2_000_000n,
     });
 
-    await openTab(program, provider, ctx.vaultPda, 1_000_000n);
+    await openTab(program, provider, ctx.vaultPda, 1_000_000n, ctx.allowedCounterparty, ctx.sessionPda);
 
     const voucher = buildSessionSignedVoucher({
       sessionKeypair: ctx.sessionKeypair,
@@ -449,6 +483,8 @@ describe("lock_voucher — happy path", () => {
       payer: provider.wallet.publicKey,
       maturityAt: null,
       holderRecoveryAt: null,
+      allowedCounterparty: ctx.allowedCounterparty,
+      sessionPda: ctx.sessionPda,
     });
 
     const tx = new Transaction().add(voucher.precompileIx, lockIx);
@@ -458,7 +494,11 @@ describe("lock_voucher — happy path", () => {
       () => program.account.vault.fetch(ctx.vaultPda),
       (v: any) => v.outstandingLockedAmount.toString() === "1000000",
     );
-    const session_post = (vault as any).activeSession;
+    // V6: session-tier fields graduated on the per-counterparty SessionAccount
+    // PDA, not vault.active_session (removed in V6).
+    const session_post = (
+      await program.account.sessionAccount.fetch(ctx.sessionPda)
+    ).session;
     expect(session_post.currentOutstanding.toString()).to.equal("0");
     expect(session_post.crystallizedCumulative.toString()).to.equal("1000000");
     expect(session_post.lastLockedSequence).to.equal(1);
@@ -492,7 +532,7 @@ describe("lock_voucher — XOR Test 1 (lock-then-tab-settle rejected)", () => {
       maxRevolvingCapacity: 2_000_000n,
     });
 
-    await openTab(program, provider, ctx.vaultPda, 1_000_000n);
+    await openTab(program, provider, ctx.vaultPda, 1_000_000n, ctx.allowedCounterparty, ctx.sessionPda);
 
     const voucher = buildSessionSignedVoucher({
       sessionKeypair: ctx.sessionKeypair,
@@ -513,6 +553,8 @@ describe("lock_voucher — XOR Test 1 (lock-then-tab-settle rejected)", () => {
       payer: provider.wallet.publicKey,
       maturityAt: null,
       holderRecoveryAt: null,
+      allowedCounterparty: ctx.allowedCounterparty,
+      sessionPda: ctx.sessionPda,
     });
     await provider.sendAndConfirm(new Transaction().add(voucher.precompileIx, lockIx));
 
@@ -576,7 +618,7 @@ describe("lock_voucher — over-cap rejection", () => {
     //    Real USDC ($4) leaves the swig-wallet-owned vault ATA → live balance
     //    drops from $5 to $1. settleTabAtomic transfers (cumulative − priorSpent)
     //    = ($4 − $0) = $4 and bumps on-chain `spent` to $4.
-    await openTab(program, provider, ctx.vaultPda, 4_000_000n);
+    await openTab(program, provider, ctx.vaultPda, 4_000_000n, ctx.allowedCounterparty, ctx.sessionPda);
     const drainVoucher = buildSessionSignedVoucher({
       sessionKeypair: ctx.sessionKeypair,
       channelId: ctx.channelId,
@@ -609,6 +651,8 @@ describe("lock_voucher — over-cap rejection", () => {
       payer: provider.wallet.publicKey,
       maturityAt: null,
       holderRecoveryAt: null,
+      allowedCounterparty: ctx.allowedCounterparty,
+      sessionPda: ctx.sessionPda,
     });
 
     let threw = false;

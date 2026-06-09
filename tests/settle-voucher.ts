@@ -41,7 +41,7 @@ describe("settle_voucher", () => {
     const vaultPda = await provisionVault();
 
     await program.methods
-      .settleVoucher({ amount: new BN(1_000_000), increment: true })
+      .settleVoucher({ amount: new BN(1_000_000), increment: true, allowedCounterparty: PublicKey.default })
       .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
@@ -56,7 +56,7 @@ describe("settle_voucher", () => {
     const vaultPda = await provisionVault();
 
     await program.methods
-      .settleVoucher({ amount: new BN(1_000_000), increment: true })
+      .settleVoucher({ amount: new BN(1_000_000), increment: true, allowedCounterparty: PublicKey.default })
       .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
@@ -64,7 +64,7 @@ describe("settle_voucher", () => {
       .rpc();
 
     await program.methods
-      .settleVoucher({ amount: new BN(1_000_000), increment: false })
+      .settleVoucher({ amount: new BN(1_000_000), increment: false, allowedCounterparty: PublicKey.default })
       .accountsPartial({
         vault: vaultPda,
         dexterAuthority: provider.wallet.publicKey,
@@ -81,7 +81,7 @@ describe("settle_voucher", () => {
     let threw = false;
     try {
       await program.methods
-        .settleVoucher({ amount: new BN(1_000_000), increment: false })
+        .settleVoucher({ amount: new BN(1_000_000), increment: false, allowedCounterparty: PublicKey.default })
         .accountsPartial({
           vault: vaultPda,
           dexterAuthority: provider.wallet.publicKey,

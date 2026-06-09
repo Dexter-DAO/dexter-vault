@@ -17,6 +17,7 @@ import {
   registerSessionV2,
   kitInstructionsToWeb3,
 } from "./register-bootstrap";
+import { deriveSessionPda } from "./session";
 
 import {
   fetchSwig,
@@ -59,6 +60,13 @@ export interface MeterVaultContext {
   /** Seller ATA — the settle credit destination. */
   sellerAta: PublicKey;
   decimals: number;
+  /** V6: the counterparty the session was registered against. settle() needs
+   *  it to (a) pass `allowedCounterparty` in the settle_tab_voucher args and
+   *  (b) re-derive the per-counterparty SessionAccount PDA. */
+  allowedCounterparty: PublicKey;
+  /** V6: the per-counterparty SessionAccount PDA the session lives on (the
+   *  session moved OUT of vault.active_session into this PDA in V6). */
+  sessionPda: PublicKey;
 }
 
 /**
@@ -99,11 +107,18 @@ export async function registerSettleableVault(
   const FUND_AMOUNT =
     BigInt(Math.max(opts.maxAmount, opts.maxRevolvingCapacity)) * 4n;
 
+  // V6: the settle/lock handlers gate on VAULT_VERSION_V6 and the session lives
+  // on a per-counterparty SessionAccount PDA — so the vault must be migrated to
+  // V6 and we must pin an explicit counterparty (rather than the random default)
+  // so settle() can re-derive the session PDA + pass allowedCounterparty.
   const bootstrap = await bootstrapForRegister(program, provider, {
     usdcFundingAmount: FUND_AMOUNT,
+    migrateTo: 6,
   });
 
-  const { sessionKeypair } = await registerSessionV2(program, provider, {
+  const allowedCounterparty = Keypair.generate().publicKey;
+
+  const { sessionKeypair, sessionPda } = await registerSessionV2(program, provider, {
     vaultPda: bootstrap.vaultPda,
     passkey: bootstrap.passkey,
     vaultUsdcAta: bootstrap.sourceAta,
@@ -111,6 +126,7 @@ export async function registerSettleableVault(
     swigWalletAddress: bootstrap.swigWalletAddress,
     maxAmount,
     maxRevolvingCapacity,
+    allowedCounterparty,
   });
 
   // Seller ATA — the settle credit destination. Independent of the bootstrap.
@@ -137,6 +153,8 @@ export async function registerSettleableVault(
     sourceAta: bootstrap.sourceAta,
     sellerAta,
     decimals: bootstrap.decimals,
+    allowedCounterparty,
+    sessionPda,
   };
 }
 
@@ -206,8 +224,13 @@ export async function settle(
   // The increment to transfer = cumulative − what the vault has already
   // settled. Read the live `spent` so repeat settles move only the delta
   // (the on-chain handler bumps `spent` to `cumulative` each time).
-  const session = (await program.account.vault.fetch(vaultPda)).activeSession;
-  if (!session) throw new Error("vault has no active session to settle against");
+  // V6: the registration moved OUT of vault.active_session into the
+  // per-counterparty SessionAccount PDA. Read `spent` from that PDA.
+  const sessionAcct = await program.account.sessionAccount.fetch(ctx.sessionPda);
+  if (!sessionAcct || sessionAcct.version === 0) {
+    throw new Error("vault has no live session to settle against");
+  }
+  const session = sessionAcct.session;
   const priorSpent = BigInt(session.spent.toString());
   if (cumulative <= priorSpent) {
     throw new Error(
@@ -235,11 +258,13 @@ export async function settle(
       channelId: Array.from(ctx.channelId),
       cumulativeAmount: new anchor.BN(cumulative.toString()),
       sequenceNumber,
+      allowedCounterparty: ctx.allowedCounterparty,
     })
     .accountsPartial({
       swig: ctx.swigAddress,
       swigWalletAddress: ctx.swigWalletAddress,
       vault: vaultPda,
+      session: ctx.sessionPda,
       dexterAuthority: provider.wallet.publicKey,
       instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
     })

@@ -76,6 +76,8 @@ describe("finalize_withdrawal — reservation gate", () => {
       payer: provider.wallet.publicKey,
       maturityAt: null,
       holderRecoveryAt: null,
+      allowedCounterparty: ctx.allowedCounterparty,
+      sessionPda: ctx.sessionPda,
     });
     await provider.sendAndConfirm(new Transaction().add(voucher.precompileIx, lockIx));
   }
@@ -195,7 +197,7 @@ describe("finalize_withdrawal — reservation gate", () => {
       maxRevolvingCapacity: 5_000_000n,
     });
 
-    await openTab(program, provider, ctx.vaultPda, 3_000_000n);
+    await openTab(program, provider, ctx.vaultPda, 3_000_000n, ctx.allowedCounterparty, ctx.sessionPda);
     await lockAmount(ctx, 3_000_000n, 1);
 
     const destination = Keypair.generate().publicKey;
