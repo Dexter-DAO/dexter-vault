@@ -15,6 +15,7 @@ use crate::verify::webauthn::verify_passkey_signed;
 const REGISTER_DOMAIN: &[u8; 32] = b"OTS_SESSION_REGISTER_V2\0\0\0\0\0\0\0\0\0";
 
 #[derive(Accounts)]
+#[instruction(args: RegisterSessionKeyArgs)]
 pub struct RegisterSessionKey<'info> {
     /// Receives the new `active_session`. Mutated, no signer required: the
     /// passkey signature embedded in the args (verified via the SIMD-0075
@@ -47,6 +48,28 @@ pub struct RegisterSessionKey<'info> {
     /// whose `clientDataJSON.challenge` decodes to sha256(registration_message).
     #[account(address = sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
+
+    /// The per-counterparty session PDA. init_if_needed: created on the first
+    /// register to this counterparty, OVERWRITTEN (replace-in-place) on a
+    /// subsequent register. The seed binds it to (vault, allowed_counterparty),
+    /// so it cannot be redirected. Re-init safety (SOL-010): the handler fully
+    /// overwrites every passkey-endorsed scope field (Task 5).
+    #[account(
+        init_if_needed,
+        payer = payer,
+        space = 8 + SessionAccount::INIT_SPACE,
+        seeds = [crate::constants::SESSION_SEED, vault.key().as_ref(), args.allowed_counterparty.as_ref()],
+        bump,
+    )]
+    pub session: Account<'info, SessionAccount>,
+
+    /// Funds the session PDA rent on first creation.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // remaining_accounts: all OTHER live sibling SessionAccounts, strict ascending
+    // order, read-only — consumed by the overcommit gate in the handler (Task 5).
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize)]
