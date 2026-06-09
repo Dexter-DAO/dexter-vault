@@ -195,3 +195,159 @@ pub fn handler(ctx: Context<MigrateV5ToV6>, _args: MigrateV5ToV6Args) -> Result<
 
     Ok(())
 }
+
+// =============================================================================
+// Task 3b — WITH-SESSION path: migrate a V5 vault carrying a LIVE active_session
+// into V6, carrying that live session OUT into a brand-new SessionAccount PDA.
+// =============================================================================
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct MigrateV5ToV6WithSessionArgs {
+    /// The allowed_counterparty of the live active_session being carried. The
+    /// handler asserts this equals the decoded active_session.allowed_counterparty,
+    /// so the caller cannot redirect the created session PDA to another counterparty.
+    pub live_counterparty: Pubkey,
+}
+
+/// WITH-SESSION migration accounts.
+///
+/// Rent dynamics differ from the no-session path: this BOTH shrinks the vault
+/// (same Option<SessionRegistration> -> u8 shrink, refunded to `payer`) AND
+/// creates a new `SessionAccount` PDA (its rent funded by `payer` via `init`).
+/// Net: `payer` funds the session PDA and receives the vault's freed rent.
+/// NOTE: `init` runs during account validation, BEFORE the handler body, so
+/// `payer` must independently afford the session-PDA rent — the later vault
+/// refund cannot back-fill it (init fails first if `payer` is short).
+///
+/// The session PDA seed `[SESSION_SEED, vault, live_counterparty]` is derived
+/// from accounts/args BEFORE the handler decodes the vault — the counterparty
+/// lives INSIDE the not-yet-decoded active_session, so it must arrive via args.
+/// The handler then asserts the decoded active_session.allowed_counterparty ==
+/// args.live_counterparty, closing the redirect gap.
+#[derive(Accounts)]
+#[instruction(args: MigrateV5ToV6WithSessionArgs)]
+pub struct MigrateV5ToV6WithSession<'info> {
+    /// CHECK: decoded manually via the frozen VaultV5Reader; owner-gated.
+    #[account(mut, owner = crate::ID)]
+    pub vault: AccountInfo<'info>,
+    /// Authority gate — must equal the decoded vault.dexter_authority.
+    pub dexter_authority: Signer<'info>,
+    /// The new session PDA, created here to hold the carried live session.
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + SessionAccount::INIT_SPACE,
+        seeds = [crate::constants::SESSION_SEED, vault.key().as_ref(), args.live_counterparty.as_ref()],
+        bump,
+    )]
+    pub session: Account<'info, SessionAccount>,
+    /// Funds the session PDA rent; receives the vault's freed (shrink) rent.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn handler_with_session(
+    ctx: Context<MigrateV5ToV6WithSession>,
+    args: MigrateV5ToV6WithSessionArgs,
+) -> Result<()> {
+    let vault_ai = &ctx.accounts.vault;
+
+    // ---- (1) decode the account as a frozen V5 struct (IDENTICAL to handler) --
+    let v5: VaultV5Reader = {
+        let data = vault_ai.try_borrow_data()?;
+        require!(data.len() >= 9, VaultError::UnsupportedVaultVersion);
+        require!(
+            &data[0..8] == Vault::DISCRIMINATOR,
+            VaultError::UnsupportedVaultVersion
+        );
+        require!(data[8] == VAULT_VERSION_V5, VaultError::UnsupportedVaultVersion);
+        let mut cursor: &[u8] = &data[8..];
+        VaultV5Reader::deserialize(&mut cursor)?
+    }; // drop the data borrow before resize takes a mut borrow
+
+    // ---- (2) authority-gate -----------------------------------------------
+    require!(
+        v5.dexter_authority == ctx.accounts.dexter_authority.key(),
+        VaultError::PasskeyVerificationFailed
+    );
+
+    // ---- (3) REQUIRE a live session whose counterparty matches args -------
+    // Clone the carried SessionRegistration EARLY so the borrow of
+    // `v5.active_session` is released before step (5) consumes v5's other fields.
+    let now = Clock::get()?.unix_timestamp;
+    let carried: SessionRegistration = v5
+        .active_session
+        .as_ref()
+        .ok_or(error!(VaultError::NoActiveSession))? // must have one
+        .clone();
+    require!(carried.expires_at > now, VaultError::SessionExpiryInPast); // must be LIVE
+    require!(
+        carried.allowed_counterparty == args.live_counterparty,
+        VaultError::SessionAccountMisderived // caller can't redirect the PDA
+    );
+
+    // ---- (4) write the SessionAccount PDA ---------------------------------
+    // Different account from the vault — these writes don't touch the vault data
+    // borrow. The carried SessionRegistration is stored verbatim.
+    {
+        let session = &mut ctx.accounts.session;
+        session.version = SESSION_VERSION_V1;
+        session.bump = ctx.bumps.session;
+        session.vault = vault_ai.key();
+        session.session = carried;
+    }
+
+    // ---- (5) re-encode as the current V6 Vault ----------------------------
+    // live_session_count = 1 (the carried session now lives in the PDA);
+    // active_session is GONE from the V6 vault. All other fields carried from v5.
+    let v6 = Vault {
+        version: VAULT_VERSION_V6,
+        bump: v5.bump,
+        passkey_pubkey: v5.passkey_pubkey,
+        swig_address: v5.swig_address,
+        cooling_off_seconds: v5.cooling_off_seconds,
+        pending_voucher_count: v5.pending_voucher_count,
+        pending_withdrawal: v5.pending_withdrawal,
+        identity_claim: v5.identity_claim,
+        dexter_authority: v5.dexter_authority,
+        live_session_count: 1,
+        outstanding_locked_amount: v5.outstanding_locked_amount,
+        total_crystallized_amount: v5.total_crystallized_amount,
+        total_settled_amount: v5.total_settled_amount,
+        borrowed: v5.borrowed,
+        standby_backer: v5.standby_backer,
+        standby_cap: v5.standby_cap,
+        borrow_recovery_at: v5.borrow_recovery_at,
+    };
+
+    // ---- (6) write the V6 encoding, shrink the vault, refund freed rent ----
+    // IDENTICAL resize/refund mechanic to handler().
+    let new_size = 8 + Vault::INIT_SPACE;
+
+    {
+        let mut data = vault_ai.try_borrow_mut_data()?;
+        let mut out = Vec::with_capacity(new_size);
+        out.extend_from_slice(Vault::DISCRIMINATOR);
+        v6.serialize(&mut out)?;
+        require!(out.len() == new_size, VaultError::UnsupportedVaultVersion);
+        require!(out.len() <= data.len(), VaultError::UnsupportedVaultVersion);
+        data[..out.len()].copy_from_slice(&out);
+    } // drop the data borrow before resize
+
+    vault_ai.resize(new_size)?;
+
+    let rent = Rent::get()?;
+    let new_min = rent.minimum_balance(new_size);
+    let cur = vault_ai.lamports();
+    if cur > new_min {
+        let refund = cur - new_min;
+        // No aliasing: `payer` is a Signer and the vault is a program-owned PDA,
+        // so a caller cannot pass the vault as `payer` (a PDA cannot sign). The
+        // two lamport borrows are distinct accounts, sequenced, no double-borrow.
+        **vault_ai.try_borrow_mut_lamports()? -= refund;
+        **ctx.accounts.payer.to_account_info().try_borrow_mut_lamports()? += refund;
+    }
+
+    Ok(())
+}
