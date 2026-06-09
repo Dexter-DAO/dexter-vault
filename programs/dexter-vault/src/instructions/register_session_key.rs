@@ -125,7 +125,7 @@ pub fn handler<'info>(
 ) -> Result<()> {
     // ── A. expiry + max_amount / revolving sanity ───────────────────────────
     require!(
-        ctx.accounts.vault.version == VAULT_VERSION_V4,
+        ctx.accounts.vault.version == VAULT_VERSION_V6,
         VaultError::UnsupportedVaultVersion
     );
     require!(args.max_amount > 0, VaultError::SessionCapZero);

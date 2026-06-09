@@ -155,6 +155,41 @@ export async function migrateVaultToV5(
 }
 
 /**
+ * (b2) Migrate a V5 vault to V6 via migrate_v5_to_v6 (the no-session path —
+ * the V6 multi-session model has no legacy active_session to lift), then poll
+ * until the on-chain `version` field reads 6. Chain this AFTER migrateVaultToV5
+ * (V4 → V5 → V6) to land a vault the V6 register_session_key gate accepts.
+ */
+export async function migrateVaultToV6(
+  program: Program<DexterVault>,
+  provider: anchor.AnchorProvider,
+  vaultPda: PublicKey,
+): Promise<void> {
+  // Same self-heal pattern as migrateVaultToV5: route through
+  // sendAndConfirmWithRetry (dropped send re-sends on a fresh blockhash), and
+  // treat a revert-after-landed (vault already V6) as success via the poll.
+  const migrateIx = await program.methods
+    .migrateV5ToV6({})
+    .accountsPartial({
+      vault: vaultPda,
+      dexterAuthority: provider.wallet.publicKey,
+      payer: provider.wallet.publicKey,
+      systemProgram: SystemProgram.programId,
+    })
+    .instruction();
+  try {
+    await sendAndConfirmWithRetry(provider, [migrateIx]);
+  } catch (err: any) {
+    const v: any = await program.account.vault.fetch(vaultPda).catch(() => null);
+    if (!v || v.version !== 6) throw err;
+  }
+  await pollUntilAccount(
+    () => program.account.vault.fetch(vaultPda),
+    (v: any) => v.version === 6,
+  );
+}
+
+/**
  * (c) Enroll a FINANCIER credit vault: bootstrap a V4 vault with the
  * draw_credit ProgramExec marker on role 1, then migrate it to V5.
  *

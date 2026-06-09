@@ -46,6 +46,7 @@ import {
   SolInstruction,
 } from "@swig-wallet/lib";
 import { address as kitAddress, createSolanaRpc } from "@solana/kit";
+import { deriveSessionPda, siblingRemainingAccounts } from "./session";
 import {
   generateP256Keypair,
   signOperationWithPasskey,
@@ -164,6 +165,12 @@ export interface BootstrapOpts {
    *  with this Mint" (0x3), because two vaults would otherwise hold ATAs on two
    *  different mints. Real credit is same-token (USDC); this mirrors that. */
   mint?: PublicKey;
+  /** Target vault version after init. Default `4` = legacy behavior (the vault
+   *  is left at V4, exactly as before — existing V4/V5 callers are unaffected).
+   *  `5` migrates V4 → V5. `6` migrates V4 → V5 → V6 (required for the V6
+   *  register_session_key gate, which now reads VAULT_VERSION_V6). The migrate
+   *  helpers live in ./credit; importing them at call-time keeps this additive. */
+  migrateTo?: 4 | 5 | 6;
 }
 
 /**
@@ -352,6 +359,20 @@ export async function bootstrapForRegister(
     );
   }
 
+  // ── Optional version migration. Default (migrateTo === undefined || 4) leaves
+  //    the vault at V4 — IDENTICAL to the pre-existing behavior, so every current
+  //    V4/V5 caller is untouched. migrateTo 5 → V4→V5; migrateTo 6 → V4→V5→V6.
+  //    The migrate helpers live in ./credit; we import them at call-time (dynamic
+  //    import) to avoid a static circular import (credit.ts imports from here).
+  const migrateTo = opts.migrateTo ?? 4;
+  if (migrateTo >= 5) {
+    const { migrateVaultToV5, migrateVaultToV6 } = await import("./credit");
+    await migrateVaultToV5(program, provider, vaultPda);
+    if (migrateTo >= 6) {
+      await migrateVaultToV6(program, provider, vaultPda);
+    }
+  }
+
   return {
     vaultPda,
     passkey,
@@ -382,11 +403,19 @@ export interface RegisterSessionV2Opts {
   allowedCounterparty?: PublicKey;
   expiresAt?: bigint;
   nonce?: number;
+  /** V6 overcommit gate: the live + expired sibling SessionAccount PDAs to pass
+   *  as remaining_accounts, in any order (siblingRemainingAccounts sorts them
+   *  strict-ascending and marks expired ones writable for the on-chain sweep).
+   *  Default `[]` — the single-session case needs no siblings. */
+  siblings?: { pubkey: PublicKey; isExpired?: boolean }[];
 }
 
 export interface RegisteredSession {
   sessionKeypair: Keypair;
   signature: string;
+  /** The per-counterparty session PDA this registration wrote (V6). Tests
+   *  fetch `program.account.sessionAccount.fetch(sessionPda)` to assert. */
+  sessionPda: PublicKey;
 }
 
 export async function registerSessionV2(
@@ -401,6 +430,14 @@ export async function registerSessionV2(
   const expiresAt =
     opts.expiresAt ?? BigInt(Math.floor(Date.now() / 1000) + 3600);
   const nonce = opts.nonce ?? 1;
+
+  // V6: the per-counterparty session PDA the handler init_if_needed-creates,
+  // derived from [SESSION_SEED, vault, allowed_counterparty] (== on-chain seeds).
+  const [sessionPda] = deriveSessionPda(
+    program.programId,
+    opts.vaultPda,
+    allowedCounterparty,
+  );
 
   const msg = sessionRegisterMessageV2({
     programId: program.programId,
@@ -435,10 +472,17 @@ export async function registerSessionV2(
       swig: opts.swigAddress,
       swigWalletAddress: opts.swigWalletAddress,
       instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+      session: sessionPda,
+      payer: provider.wallet.publicKey,
+      systemProgram: SystemProgram.programId,
     })
+    .remainingAccounts(siblingRemainingAccounts(opts.siblings ?? []))
     .instruction();
-  // [precompile, register_session_key] pair — resilient send + poll the RESULT
-  // (vault.activeSession now bound to this session pubkey). On a transient drop
+  // [precompile, register_session_key] pair — resilient send + poll the RESULT.
+  // V6 REMOVED vault.activeSession — the registration now lives in the
+  // per-counterparty SessionAccount PDA. Poll THAT: fetch the session PDA and
+  // confirm its `session.sessionPubkey` matches the registered pubkey AND its
+  // `version != 0` (0 = never-touched / cleared-by-revoke). On a transient drop
   // the poll confirms whether the first send landed (a blind resubmit would
   // revert on the nonce/duplicate); a real revert on the first send propagates.
   // Precompile order preserved. If the helper self-heals via poll it returns no
@@ -448,10 +492,11 @@ export async function registerSessionV2(
     provider,
     [precompileIx, vaultIx],
     async () => {
-      const v: any = await program.account.vault.fetch(opts.vaultPda);
-      const active = v.activeSession;
-      if (!active) return false;
-      const onchain: number[] = active.sessionPubkey;
+      const s: any = await program.account.sessionAccount
+        .fetch(sessionPda)
+        .catch(() => null);
+      if (!s || s.version === 0) return false;
+      const onchain: number[] = s.session.sessionPubkey;
       return (
         onchain.length === sessionPubkey.length &&
         onchain.every((b, i) => b === sessionPubkey[i])
@@ -459,5 +504,5 @@ export async function registerSessionV2(
     },
   );
   const signature = sig ?? "";
-  return { sessionKeypair, signature };
+  return { sessionKeypair, signature, sessionPda };
 }
