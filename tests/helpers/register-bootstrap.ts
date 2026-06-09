@@ -518,9 +518,22 @@ export async function registerSessionV2(
   // "Account does not exist". So we ALWAYS wait here until the session PDA is
   // visible and written (version != 0) before returning. Every caller inherits a
   // read-your-writes guarantee; no per-call-site polling needed.
+  // Wait until THIS registration's CONTENT is visible (not just that the account
+  // exists): match the on-chain session_pubkey to the one we just registered. On a
+  // REPLACE (re-register same counterparty) the account already has version!=0 with
+  // the OLD scope, so a version-only poll would pass on stale data before the
+  // overwrite lands; the fresh-per-register session_pubkey is the reliable
+  // new-content signal for BOTH new and replace paths.
   await pollUntilAccount(
     () => program.account.sessionAccount.fetch(sessionPda),
-    (s: any) => s.version !== 0,
+    (s: any) => {
+      if (s.version === 0) return false; // not yet written / cleared
+      const onchain: number[] = s.session.sessionPubkey;
+      return (
+        onchain.length === sessionPubkey.length &&
+        onchain.every((b, i) => b === sessionPubkey[i])
+      );
+    },
   );
   return { sessionKeypair, signature, sessionPda, allowedCounterparty };
 }

@@ -425,6 +425,15 @@ describe("V6 session lifecycle — settle/revoke-CLEAR/revival/lock/meter-reset 
         return !!s && s.version === 0;
       },
     );
+    // CONFIRM-VISIBILITY: sendPrecompilePairResilient only polls on the self-heal
+    // path; on the happy path it returns without waiting. On a lean RPC plan the
+    // cleared state may not be replica-visible yet, so a caller that immediately
+    // reads version / live_session_count gets the STALE pre-revoke value. Always
+    // wait until the clear (version == 0) is visible before returning.
+    await pollUntilAccount(
+      () => program.account.sessionAccount.fetch(sessionPda),
+      (s: any) => s.version === 0,
+    );
   }
 
   // ───────────────────────────────────────────────────────────────────────────
