@@ -117,6 +117,10 @@ pub mod dexter_vault {
         instructions::migrate_v4_to_v5::handler(ctx, args)
     }
 
+    pub fn migrate_v5_to_v6(ctx: Context<MigrateV5ToV6>, args: MigrateV5ToV6Args) -> Result<()> {
+        instructions::migrate_v5_to_v6::handler(ctx, args)
+    }
+
     pub fn lock_voucher(
         ctx: Context<LockVoucher>,
         args: LockVoucherArgs,
