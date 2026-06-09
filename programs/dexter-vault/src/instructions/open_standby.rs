@@ -73,7 +73,7 @@ pub struct OpenStandbyArgs {
 
 pub fn handler(ctx: Context<OpenStandby>, args: OpenStandbyArgs) -> Result<()> {
     require!(
-        ctx.accounts.vault.version == VAULT_VERSION_V5,
+        ctx.accounts.vault.version == VAULT_VERSION_V5 || ctx.accounts.vault.version == VAULT_VERSION_V6,
         VaultError::UnsupportedVaultVersion
     );
 

@@ -56,7 +56,7 @@ pub struct ForceReleaseArgs {
 pub fn handler(ctx: Context<ForceRelease>, args: ForceReleaseArgs) -> Result<()> {
     let vault = &mut ctx.accounts.vault;
     require!(
-        vault.version == VAULT_VERSION_V4 || vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
+        vault.version == VAULT_VERSION_V6 || vault.version == VAULT_VERSION_V5 || vault.version == VAULT_VERSION_V4 || vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
         VaultError::UnsupportedVaultVersion
     );
 

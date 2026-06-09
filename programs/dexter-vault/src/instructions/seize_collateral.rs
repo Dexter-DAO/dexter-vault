@@ -105,7 +105,7 @@ pub struct SeizeCollateralArgs {}
 pub fn handler(ctx: Context<SeizeCollateral>, _args: SeizeCollateralArgs) -> Result<()> {
     // Match repay_credit / draw_credit's version guard.
     require!(
-        ctx.accounts.vault.version == VAULT_VERSION_V5,
+        ctx.accounts.vault.version == VAULT_VERSION_V5 || ctx.accounts.vault.version == VAULT_VERSION_V6,
         VaultError::UnsupportedVaultVersion
     );
 

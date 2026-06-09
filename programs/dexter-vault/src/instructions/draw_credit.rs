@@ -99,7 +99,7 @@ pub struct DrawCreditArgs {
 pub fn handler(ctx: Context<DrawCredit>, args: DrawCreditArgs) -> Result<()> {
     // Match open_standby's version guard.
     require!(
-        ctx.accounts.vault.version == VAULT_VERSION_V5,
+        ctx.accounts.vault.version == VAULT_VERSION_V5 || ctx.accounts.vault.version == VAULT_VERSION_V6,
         VaultError::UnsupportedVaultVersion
     );
 

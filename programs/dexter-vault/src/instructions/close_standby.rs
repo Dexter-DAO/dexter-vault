@@ -130,7 +130,7 @@ pub struct CloseStandbyArgs {
 fn close_standby_core(vault: &mut Vault, standby_backer: &mut StandbyBacker) -> Result<()> {
     // Version guard.
     require!(
-        vault.version == VAULT_VERSION_V5,
+        vault.version == VAULT_VERSION_V5 || vault.version == VAULT_VERSION_V6,
         VaultError::UnsupportedVaultVersion
     );
     // Must have a standby to close.
