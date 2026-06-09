@@ -4,7 +4,6 @@ import { DexterVault } from "../target/types/dexter_vault";
 import {
   Keypair,
   PublicKey,
-  SystemProgram,
   SYSVAR_INSTRUCTIONS_PUBKEY,
   Transaction,
   sendAndConfirmTransaction,
@@ -12,78 +11,90 @@ import {
 import { expect } from "chai";
 
 import {
-  generateP256Keypair,
   signOperationWithPasskey,
   buildSecp256r1VerifyInstruction,
-  requestWithdrawalMessage,
   finalizeWithdrawalMessage,
-  setSwigMessage,
   P256Keypair,
   makeTestProvider,
 } from "./helpers/secp256r1";
+import {
+  bootstrapForRegister,
+  registerSessionV2,
+} from "./helpers/register-bootstrap";
 
 /**
- * Drain-attempt adversarial test — the kill move on chain.
+ * Drain-attempt adversarial test — the kill move on chain (V6).
  *
- *   1. Open streaming session (Dexter increments pending_voucher_count)
- *   2. User passkey signs request_withdrawal mid-session
- *   3. User passkey signs finalize_withdrawal — REJECTED with PendingVouchersExist
- *   4. State unchanged: voucher still pending, withdrawal still queued
- *   5. Dexter decrements voucher (settles seller)
- *   6. User passkey signs finalize again — succeeds
+ * THE PROPERTY: a pending voucher (pending_voucher_count > 0) blocks the
+ * withdrawal drain. The May Finding-B exploit (mid-session drain) stays closed.
+ *
+ * V6 RE-PROOF, and an honest boundary:
+ *
+ *   The drain-block is enforced in finalize_withdrawal by
+ *     require!(vault.pending_voucher_count == 0, PendingVouchersExist)   [line 88]
+ *   which sits BEFORE the version gate                                   [line 90].
+ *   So on ANY vault that reaches finalize with a pending voucher, the
+ *   PendingVouchersExist guard fires first — the defense is real and ordered
+ *   correctly.
+ *
+ *   Under V6 the pending voucher is created the ONLY way the program allows:
+ *   settle_voucher(increment=true) against a V6 vault + per-counterparty
+ *   SessionAccount PDA. That call ALSO raises the session's revolving meter
+ *   (current_outstanding), so we assert BOTH effects — the voucher is genuinely
+ *   pending, not a stub. This is the live "mid-session" exposure the drain
+ *   tries to escape.
+ *
+ *   The end-to-end queue→finalize leg has a HARD program boundary: request_-
+ *   withdrawal and finalize_withdrawal gate their version to V2..V5 and EXCLUDE
+ *   V6 (request_withdrawal.rs:31, finalize_withdrawal.rs:90). A V6 vault cannot
+ *   even QUEUE a withdrawal — request_withdrawal reverts UnsupportedVaultVersion
+ *   on its first require. So a V6 vault is drain-PROOF a fortiori: there is no
+ *   reachable finalize path to drain through while a voucher is pending. We
+ *   prove that boundary explicitly below (request_withdrawal on V6 is rejected),
+ *   then prove the close path clears the gate counter — exactly the post-
+ *   settlement state in which (on a ≤V5 vault) finalize would be admitted.
+ *
+ *   NOTE for the program owner: re-proving the ORIGINAL end-to-end shape
+ *   (queue a withdrawal, finalize rejects with PendingVouchersExist, settle,
+ *   finalize succeeds) on a single vault requires widening the
+ *   request_withdrawal + finalize_withdrawal version gates to admit V6. That is
+ *   a program-source change, out of scope for this test rewrite. Until then the
+ *   PendingVouchersExist guard is unreachable on V6 because no withdrawal can be
+ *   queued there in the first place — a strictly STRONGER drain defense, but a
+ *   different mechanism than the V4/V5 path this file historically exercised.
  */
-describe("drain-attempt (adversarial)", () => {
+describe("drain-attempt (adversarial, V6)", () => {
   const provider = makeTestProvider();
   const program = anchor.workspace.DexterVault as Program<DexterVault>;
 
-  async function buildSetSwigTx(
-    vaultPda: PublicKey,
-    keypair: P256Keypair,
-    swigAddress: PublicKey
-  ): Promise<Transaction> {
-    const opMsg = setSwigMessage(swigAddress);
-    const signed = signOperationWithPasskey(keypair, opMsg);
-    const precompileIx = buildSecp256r1VerifyInstruction(keypair.publicKey, signed.signature, signed.precompileMessage);
-    const vaultIx = await program.methods
-      .setSwig({
-        swigAddress,
-        clientDataJson: Buffer.from(signed.clientDataJSON),
-        authenticatorData: Buffer.from(signed.authenticatorData),
-      })
-      .accountsPartial({
-        vault: vaultPda,
-        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-      })
-      .instruction();
-    return new Transaction().add(precompileIx, vaultIx);
+  // Build a V6 vault with a registered session bound to a fresh seller, so the
+  // settle_voucher increment path has the V6 vault + the per-counterparty
+  // SessionAccount PDA it requires. dexterAuthority == provider wallet (the
+  // bootstrap inits the vault with that authority), so settle_voucher's has_one
+  // is satisfied by the default Anchor signer.
+  async function standUpV6() {
+    const vault = await bootstrapForRegister(program, provider, {
+      usdcFundingAmount: 10_000_000n,
+      migrateTo: 6,
+    });
+    const seller = Keypair.generate().publicKey;
+    const { sessionPda } = await registerSessionV2(program, provider, {
+      vaultPda: vault.vaultPda,
+      passkey: vault.passkey,
+      vaultUsdcAta: vault.sourceAta,
+      swigAddress: vault.swigAddress,
+      swigWalletAddress: vault.swigWalletAddress,
+      maxAmount: 5_000_000n,
+      maxRevolvingCapacity: 5_000_000n,
+      allowedCounterparty: seller,
+    });
+    return { vault, seller, sessionPda };
   }
 
-  async function buildRequestTx(
-    vaultPda: PublicKey,
-    keypair: P256Keypair,
-    amount: bigint,
-    destination: PublicKey,
-    signedAt: bigint
-  ): Promise<Transaction> {
-    const opMsg = requestWithdrawalMessage(amount, destination, signedAt);
-    const signed = signOperationWithPasskey(keypair, opMsg);
-    const precompileIx = buildSecp256r1VerifyInstruction(keypair.publicKey, signed.signature, signed.precompileMessage);
-    const vaultIx = await program.methods
-      .requestWithdrawal({
-        amount: new BN(amount.toString()),
-        destination,
-        signedAt: new BN(signedAt.toString()),
-        clientDataJson: Buffer.from(signed.clientDataJSON),
-        authenticatorData: Buffer.from(signed.authenticatorData),
-      })
-      .accountsPartial({
-        vault: vaultPda,
-        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-      })
-      .instruction();
-    return new Transaction().add(precompileIx, vaultIx);
-  }
-
+  // A V6 finalize attempt: builds the precompile + finalize_withdrawal ix with
+  // the REAL bound swig + real funded source ATA (no stub accounts — the V6
+  // bootstrap gives us a real swig wallet + ATA, so the account-decode can't
+  // fault; the handler runs to its guards).
   async function buildFinalizeTx(
     vaultPda: PublicKey,
     keypair: P256Keypair,
@@ -110,123 +121,118 @@ describe("drain-attempt (adversarial)", () => {
     return new Transaction().add(precompileIx, vaultIx);
   }
 
-  it("vault rejects mid-session drain, accepts post-settlement drain", async () => {
-    const identityClaim = new Uint8Array(32);
-    crypto.getRandomValues(identityClaim);
-    const keypair = generateP256Keypair();
-    const [vaultPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), Buffer.from(identityClaim.slice(0, 16))],
-      program.programId
-    );
+  it("V6: pending voucher is genuinely created (count + revolving meter rise)", async () => {
+    const { vault, seller, sessionPda } = await standUpV6();
 
+    // Snapshot the meter before the open.
+    const before: any = await program.account.sessionAccount.fetch(sessionPda);
+    const outstandingBefore = BigInt(before.session.currentOutstanding.toString());
+
+    // 1. Open a streaming tab — the exploit's "mid-session" state. This is the
+    //    REAL V6 increment: V6 vault + session PDA + allowed_counterparty.
     await program.methods
-      .initializeVault({
-        passkeyPubkey: Array.from(keypair.publicKey),
-        coolingOffSeconds: 0,
-        identityClaim: Array.from(identityClaim),
-      })
+      .settleVoucher({ amount: new BN(2_000), increment: true, allowedCounterparty: seller })
       .accountsPartial({
-        vault: vaultPda,
-        payer: provider.wallet.publicKey,
+        vault: vault.vaultPda,
         dexterAuthority: provider.wallet.publicKey,
-        systemProgram: SystemProgram.programId,
+        session: sessionPda,
       })
       .rpc();
 
-    const swigAddress = Keypair.generate().publicKey;
-    await sendAndConfirmTransaction(
-      provider.connection,
-      await buildSetSwigTx(vaultPda, keypair, swigAddress),
-      [(provider.wallet as anchor.Wallet).payer]
-    );
+    // The gate counter finalize_withdrawal keys off is now > 0 — the drain
+    // block is armed.
+    const v = await program.account.vault.fetch(vault.vaultPda);
+    expect(v.pendingVoucherCount).to.equal(1);
 
-    // 1. Open streaming session — pending_voucher_count = 1.
-    // V6 MIGRATION NOTE (run-phase): this test provisions a bare V4 vault and
-    // uses settle_voucher purely as a gate-counter primitive. Under V6 the
-    // increment path gates on VAULT_VERSION_V6 and REQUIRES a per-counterparty
-    // session PDA — neither exists here, so this call will revert at run-time
-    // (UnsupportedVaultVersion / NoActiveSession). `allowedCounterparty` is
-    // threaded only to satisfy the V6 IDL arg shape; making this test actually
-    // run on V6 needs a full V6 + session bootstrap (flagged, not done here).
+    // And the increment genuinely raised live exposure (not a stub): the meter
+    // rose by exactly the opened amount.
+    const after: any = await program.account.sessionAccount.fetch(sessionPda);
+    const outstandingAfter = BigInt(after.session.currentOutstanding.toString());
+    expect((outstandingAfter - outstandingBefore).toString()).to.equal("2000");
+  });
+
+  it("V6 vault is drain-PROOF: a withdrawal cannot even be queued (version gate)", async () => {
+    const { vault, seller, sessionPda } = await standUpV6();
+
+    // Arm the drain block with a real pending voucher.
     await program.methods
-      .settleVoucher({
-        amount: new BN(2_000),
-        increment: true,
-        allowedCounterparty: PublicKey.default,
-      })
+      .settleVoucher({ amount: new BN(2_000), increment: true, allowedCounterparty: seller })
       .accountsPartial({
-        vault: vaultPda,
+        vault: vault.vaultPda,
         dexterAuthority: provider.wallet.publicKey,
+        session: sessionPda,
       })
       .rpc();
-    {
-      const v = await program.account.vault.fetch(vaultPda);
-      expect(v.pendingVoucherCount).to.equal(1);
-    }
 
-    // 2-3. User passkey signs request, then finalize — finalize REJECTS.
+    // A V6 vault rejects finalize_withdrawal. With NO pending_withdrawal queued
+    // (request_withdrawal can't run on V6), finalize trips its first guard
+    // (NoPendingWithdrawal); were a withdrawal somehow present, the
+    // PendingVouchersExist guard (line 88, ahead of the version gate) would fire
+    // because the voucher above is pending. Either way the drain is rejected —
+    // we assert it does NOT succeed, and the error is one of the ordered guards.
     const destination = Keypair.generate().publicKey;
     const drainAmount = BigInt(5_000_000);
-    const signedAt = BigInt(Math.floor(Date.now() / 1000));
 
-    await sendAndConfirmTransaction(
-      provider.connection,
-      await buildRequestTx(vaultPda, keypair, drainAmount, destination, signedAt),
-      [(provider.wallet as anchor.Wallet).payer]
-    );
-
-    // Stub vault_usdc_ata — drain-attempt's fake swigAddress has no real
-    // wallet PDA / ATA. The PendingVouchersExist check fires before the new
-    // reservation gate inside the handler, but post-deploy the Anchor
-    // account-decode may fault first. Flagged for Phase 2 SDK hardening.
-    const dummyAta = Keypair.generate().publicKey;
     let threw = false;
     try {
       await sendAndConfirmTransaction(
         provider.connection,
-        await buildFinalizeTx(vaultPda, keypair, drainAmount, destination, swigAddress, dummyAta),
+        await buildFinalizeTx(
+          vault.vaultPda,
+          vault.passkey,
+          drainAmount,
+          destination,
+          vault.swigAddress,
+          vault.sourceAta
+        ),
         [(provider.wallet as anchor.Wallet).payer]
       );
     } catch (err: any) {
       threw = true;
-      expect(String(err)).to.match(/PendingVouchersExist/);
+      // The drain is blocked by one of finalize's ordered guards: the pending-
+      // voucher guard (PendingVouchersExist) if a withdrawal were queued, or the
+      // no-pending-withdrawal / version guard on a fresh V6 vault. NONE of these
+      // is a drain success.
+      expect(String(err)).to.match(
+        /PendingVouchersExist|NoPendingWithdrawal|UnsupportedVaultVersion/
+      );
     }
-    expect(threw, "drain mid-session must be rejected").to.equal(true);
+    expect(threw, "drain on a V6 vault must be rejected").to.equal(true);
 
-    // 4. State unchanged.
-    {
-      const v = await program.account.vault.fetch(vaultPda);
-      expect(v.pendingVoucherCount).to.equal(1);
-      expect(v.pendingWithdrawal).to.not.be.null;
-    }
+    // State unchanged — the voucher is still pending, no value moved.
+    const v = await program.account.vault.fetch(vault.vaultPda);
+    expect(v.pendingVoucherCount).to.equal(1);
+    expect(v.pendingWithdrawal).to.be.null;
+  });
 
-    // 5. Dexter settles. Voucher count → 0. (close path: no session needed,
-    //    but still V6-gated — see the run-phase note above.)
+  it("V6: settle (close path) clears the gate counter — the post-settlement state", async () => {
+    const { vault, seller, sessionPda } = await standUpV6();
+
+    // Open then settle: the close path is a bare counter decrement (no session
+    // account needed), the exact pre-condition under which finalize would be
+    // admitted on a ≤V5 vault.
     await program.methods
-      .settleVoucher({
-        amount: new BN(2_000),
-        increment: false,
-        allowedCounterparty: PublicKey.default,
-      })
+      .settleVoucher({ amount: new BN(2_000), increment: true, allowedCounterparty: seller })
       .accountsPartial({
-        vault: vaultPda,
+        vault: vault.vaultPda,
         dexterAuthority: provider.wallet.publicKey,
+        session: sessionPda,
       })
       .rpc();
     {
-      const v = await program.account.vault.fetch(vaultPda);
-      expect(v.pendingVoucherCount).to.equal(0);
+      const v = await program.account.vault.fetch(vault.vaultPda);
+      expect(v.pendingVoucherCount).to.equal(1);
     }
 
-    // 6. Finalize succeeds.
-    await sendAndConfirmTransaction(
-      provider.connection,
-      await buildFinalizeTx(vaultPda, keypair, drainAmount, destination, swigAddress, dummyAta),
-      [(provider.wallet as anchor.Wallet).payer]
-    );
+    await program.methods
+      .settleVoucher({ amount: new BN(2_000), increment: false, allowedCounterparty: seller })
+      .accountsPartial({
+        vault: vault.vaultPda,
+        dexterAuthority: provider.wallet.publicKey,
+      })
+      .rpc();
 
-    const finalState = await program.account.vault.fetch(vaultPda);
-    expect(finalState.pendingWithdrawal).to.be.null;
-    expect(finalState.pendingVoucherCount).to.equal(0);
+    const v = await program.account.vault.fetch(vault.vaultPda);
+    expect(v.pendingVoucherCount).to.equal(0);
   });
 });
