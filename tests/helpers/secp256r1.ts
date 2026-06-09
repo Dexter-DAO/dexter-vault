@@ -319,13 +319,14 @@ export async function sendAndConfirmWithRetry(
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      const { blockhash } = await provider.connection.getLatestBlockhash("finalized");
+      const { blockhash } = await provider.connection.getLatestBlockhash("confirmed");
       const tx = new Transaction();
       tx.recentBlockhash = blockhash;
       tx.feePayer = provider.wallet.publicKey;
       tx.add(...instructions);
-      // provider.sendAndConfirm signs with the wallet + any extra signers and confirms.
-      return await provider.sendAndConfirm(tx, signers);
+      // HTTP-poll confirm (no WS). These are idempotent setup txs, so `confirmed`
+      // is safe and avoids the long finalized wait that compounds under pacing.
+      return await sendRawAndConfirmHttp(provider, tx, signers, "confirmed");
     } catch (err: any) {
       lastErr = err;
       const msg = String(err?.message ?? err);
@@ -337,7 +338,11 @@ export async function sendAndConfirmWithRetry(
         msg.includes("was not confirmed") ||
         msg.includes("block height exceeded") ||
         msg.includes("Blockhash not found") ||
-        msg.includes("expired");
+        msg.includes("expired") ||
+        // RPC rate-limit that escaped the connection-level 429 backoff: still
+        // transient (the tx wasn't processed), so a fresh-blockhash resend is safe.
+        msg.includes("429") ||
+        msg.includes("Too Many Requests");
       if (!isTransient || i === attempts - 1) throw err;
       // brief backoff before fresh-blockhash resubmit
       await new Promise((r) => setTimeout(r, 1500));
@@ -403,12 +408,13 @@ export async function sendPrecompilePairResilient(
   pollIntervalMs: number = 250,
 ): Promise<string | undefined> {
   const send = async (): Promise<string> => {
-    const { blockhash } = await provider.connection.getLatestBlockhash("finalized");
+    const { blockhash } = await provider.connection.getLatestBlockhash("confirmed");
     const tx = new Transaction();
     tx.recentBlockhash = blockhash;
     tx.feePayer = provider.wallet.publicKey;
     tx.add(...instructions); // order preserved: [precompileIx, vaultIx]
-    return await provider.sendAndConfirm(tx, signers);
+    // HTTP-poll confirm (no WS) so 429s stay inside the rate-limited HTTP path.
+    return await sendRawAndConfirmHttp(provider, tx, signers, "confirmed");
   };
 
   const pollLanded = async (): Promise<boolean> => {
@@ -672,8 +678,8 @@ export async function fundFromProvider(
 export async function pollUntilAccountExists(
   connection: Connection,
   pubkey: PublicKey,
-  timeoutMs: number = 15_000,
-  intervalMs: number = 250,
+  timeoutMs: number = 30_000,
+  intervalMs: number = 1_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -702,8 +708,8 @@ export async function pollUntilAccountExists(
 export async function pollUntilAccount<T>(
   fetchFn: () => Promise<T>,
   predicate: (acct: T) => boolean,
-  timeoutMs: number = 15_000,
-  intervalMs: number = 250,
+  timeoutMs: number = 30_000,
+  intervalMs: number = 1_000,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let last: T | undefined;
@@ -783,6 +789,167 @@ export async function createAtaIdempotentFinalized(
 // not UX latency.
 //
 // Reads env: ANCHOR_PROVIDER_URL, ANCHOR_WALLET (same as anchor test).
+// ── RPC rate-limiter + 429 backoff (test-only; never touches the program) ──
+//
+// This dense suite drives ONE shared Connection (created below in
+// makeTestProvider) through ~25 call sites: getLatestBlockhash on every
+// sendAndConfirmWithRetry attempt, tight account-fetch poll loops, ATA reads,
+// etc. On a lean RPC plan that burst pattern blows straight through the
+// per-second rate ceiling → HTTP 429 → throttled reads serve stale state →
+// the V4→V5→V6 migration chain fires against a vault the RPC REPORTED as
+// migrated before the leader finalized it → spurious UnsupportedVaultVersion.
+// The failures are nondeterministic (different cases each run) — the signature
+// of throttling, not a program bug.
+//
+// Fix: wrap the connection's single private `_rpcRequest` chokepoint with
+//   (1) a token-bucket that paces ALL outbound RPC to a safe steady rate, and
+//   (2) exponential backoff that RETRIES on 429 instead of surfacing it.
+// Every fetch/getLatestBlockhash/getAccountInfo in the suite inherits this for
+// free — no per-call-site edits. Tunable via env for fatter/leaner plans.
+
+// Steady-state requests/sec. Default 8 RPS keeps us comfortably under a typical
+// ~10 RPS lean-plan ceiling. Override with RPC_MAX_RPS for a fatter plan.
+const RPC_MAX_RPS = Number(process.env.RPC_MAX_RPS ?? "8");
+const RPC_MIN_INTERVAL_MS = Math.ceil(1000 / Math.max(1, RPC_MAX_RPS));
+// How many times to retry a 429'd request before giving up.
+const RPC_MAX_429_RETRIES = Number(process.env.RPC_MAX_429_RETRIES ?? "8");
+
+// Serialize the pacing gate so concurrent in-flight calls don't all fire at
+// once: each caller waits until at least RPC_MIN_INTERVAL_MS after the prior.
+let rpcGateChain: Promise<void> = Promise.resolve();
+function paceRpc(): Promise<void> {
+  // chain a slot onto the gate; the returned promise resolves when it's our turn
+  const wait = rpcGateChain.then(
+    () => new Promise<void>((r) => setTimeout(r, RPC_MIN_INTERVAL_MS)),
+  );
+  rpcGateChain = wait;
+  return wait;
+}
+
+function is429(err: any): boolean {
+  const msg = String(err?.message ?? err);
+  return (
+    msg.includes("429") ||
+    msg.includes("Too Many Requests") ||
+    err?.statusCode === 429 ||
+    err?.status === 429
+  );
+}
+
+// Install the limiter onto a Connection by wrapping its private _rpcRequest.
+// web3.js routes EVERY RPC method (getAccountInfo, getLatestBlockhash, the
+// Anchor account fetches, etc.) through this one method, so wrapping it once
+// throttles the entire suite. Idempotent-guarded so a re-wrap is a no-op.
+function installRpcRateLimiter(connection: Connection): void {
+  const conn = connection as any;
+  if (conn.__rateLimited) return;
+  conn.__rateLimited = true;
+  const original = conn._rpcRequest.bind(conn);
+  conn._rpcRequest = async (method: string, args: any[]) => {
+    for (let attempt = 0; ; attempt++) {
+      await paceRpc(); // steady-rate gate before every send
+      try {
+        return await original(method, args);
+      } catch (err: any) {
+        if (is429(err) && attempt < RPC_MAX_429_RETRIES) {
+          // exponential backoff with a small ceiling: 300, 600, 1200 … capped 5s
+          const backoff = Math.min(300 * 2 ** attempt, 5_000);
+          await new Promise((r) => setTimeout(r, backoff));
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+}
+
+// ── Rate-limited @solana/kit RPC (the THIRD channel; test-only) ────────────
+//
+// @swig-wallet/kit calls fetchSwig() through its OWN @solana/kit RPC client,
+// built by createSolanaRpc(endpoint) in the test helpers — a SEPARATE HTTP path
+// from the web3.js Connection, so installRpcRateLimiter never sees it. On a lean
+// plan it 429s independently ("HTTP error (429)" from @solana/kit/http-transport).
+//
+// Fix: build the kit RPC from a transport that shares the SAME paceRpc() gate +
+// 429 backoff as the web3.js limiter, so all THREE channels (web3.js HTTP, the
+// HTTP-poll confirm, and this kit RPC) draw from one rate budget. Every helper
+// must use makeRateLimitedKitRpc() instead of a bare createSolanaRpc().
+export function makeRateLimitedKitRpc(endpoint: string): any {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const kit = require("@solana/kit");
+  const inner = kit.createDefaultRpcTransport({ url: endpoint });
+  const pacedTransport = async (...args: any[]) => {
+    for (let attempt = 0; ; attempt++) {
+      await paceRpc();
+      try {
+        return await inner(...args);
+      } catch (err: any) {
+        if (is429(err) && attempt < RPC_MAX_429_RETRIES) {
+          const backoff = Math.min(300 * 2 ** attempt, 5_000);
+          await new Promise((r) => setTimeout(r, backoff));
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+  return kit.createSolanaRpcFromTransport(pacedTransport);
+}
+
+// ── HTTP-polling confirmation (no WebSocket; test-only) ────────────────────
+//
+// provider.sendAndConfirm / sendAndConfirmRawTransaction confirm via a
+// WebSocket `signatureSubscribe`. On a lean RPC plan the WS endpoint 429s
+// ("ws error: Unexpected server response: 429") — entirely OUTSIDE the HTTP
+// rate-limiter, so it can't be paced or backed off. The confirm then hangs/fails
+// and the dense migration chain breaks.
+//
+// This helper sends the raw tx and confirms by POLLING getSignatureStatuses over
+// HTTP — which flows through installRpcRateLimiter (paced + 429-backed-off) like
+// every other call. No WS dependency at all. Returns the signature once it
+// reaches the target commitment; throws on an on-chain error or confirm timeout.
+async function sendRawAndConfirmHttp(
+  provider: AnchorProvider,
+  tx: Transaction,
+  signers: Signer[],
+  commitment: "confirmed" | "finalized" = "confirmed",
+  timeoutMs: number = 90_000,
+  pollIntervalMs: number = 1_000,
+): Promise<string> {
+  // wallet signs first (feePayer), then any extra signers
+  const signed = await provider.wallet.signTransaction(tx);
+  if (signers.length) signed.partialSign(...signers);
+  const raw = signed.serialize();
+  const sig = await provider.connection.sendRawTransaction(raw, {
+    skipPreflight: false,
+    preflightCommitment: commitment,
+  });
+
+  const deadline = Date.now() + timeoutMs;
+  const wantFinal = commitment === "finalized";
+  while (Date.now() < deadline) {
+    const { value } = await provider.connection.getSignatureStatuses([sig]);
+    const st = value[0];
+    if (st) {
+      if (st.err) {
+        // surface the on-chain error the same way sendAndConfirm would, so
+        // negative-path assertions still see the program revert
+        throw new Error(
+          `Transaction ${sig} failed: ${JSON.stringify(st.err)}`,
+        );
+      }
+      const reached =
+        st.confirmationStatus === "finalized" ||
+        (!wantFinal && st.confirmationStatus === "confirmed");
+      if (reached) return sig;
+    }
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+  throw new Error(
+    `sendRawAndConfirmHttp: ${sig} not ${commitment} within ${timeoutMs}ms`,
+  );
+}
+
 export function makeTestProvider(): AnchorProvider {
   const url = process.env.ANCHOR_PROVIDER_URL;
   if (!url) throw new Error("ANCHOR_PROVIDER_URL is not set");
@@ -801,7 +968,17 @@ export function makeTestProvider(): AnchorProvider {
   const connection = new Connection(url, {
     commitment: "finalized",
     confirmTransactionInitialTimeout: 90_000,
+    // Disable web3.js's BUILT-IN fixed-500ms 429 retry. That internal retry
+    // swallows 429s inside the request (so our limiter's backoff never sees the
+    // throw) and re-fires at a rate that ignores the plan ceiling — making 429s
+    // WORSE. With it off, a 429 THROWS and our installRpcRateLimiter wrapper
+    // owns the exponential backoff instead. (test-only)
+    disableRetryOnRateLimit: true,
   });
+  // Throttle ALL RPC through this one shared connection: token-bucket pacing +
+  // 429 backoff. Fits a lean RPC plan's rate ceiling so the dense setup paths
+  // don't trip 429 → stale-read migration failures. (test-only)
+  installRpcRateLimiter(connection);
   // anchor.Wallet.local() reads ANCHOR_WALLET
   const wallet = (anchor as any).Wallet.local();
   const provider = new AnchorProvider(connection, wallet, {

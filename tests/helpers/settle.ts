@@ -11,6 +11,7 @@ import {
 } from "@solana/web3.js";
 import {
   createAtaIdempotentFinalized,
+  makeRateLimitedKitRpc,
 } from "./secp256r1";
 import {
   bootstrapForRegister,
@@ -23,7 +24,7 @@ import {
   fetchSwig,
   getSignInstructions,
 } from "@swig-wallet/kit";
-import { address as kitAddress, createSolanaRpc } from "@solana/kit";
+import { address as kitAddress } from "@solana/kit";
 import {
   getTransferCheckedInstruction,
   TOKEN_PROGRAM_ADDRESS,
@@ -217,7 +218,7 @@ export async function settle(
 ): Promise<void> {
   const connection = provider.connection;
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(connection.rpcEndpoint);
+  const rpc = makeRateLimitedKitRpc(connection.rpcEndpoint);
   const sequenceNumber = opts.sequenceNumber ?? 1;
   const cumulative = BigInt(cumulativeAmount);
 

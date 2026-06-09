@@ -45,7 +45,7 @@ import {
   createProgramExecAuthorityInfo,
   SolInstruction,
 } from "@swig-wallet/lib";
-import { address as kitAddress, createSolanaRpc } from "@solana/kit";
+import { address as kitAddress } from "@solana/kit";
 import { deriveSessionPda, siblingRemainingAccounts } from "./session";
 import {
   generateP256Keypair,
@@ -60,6 +60,7 @@ import {
   sendAndConfirmWithRetry,
   sendPrecompilePairResilient,
   sendCreateSwigResilient,
+  makeRateLimitedKitRpc,
 } from "./secp256r1";
 
 // settle_tab_voucher's Anchor discriminator — the 8-byte instruction-data
@@ -187,7 +188,7 @@ export async function bootstrapForRegister(
 ): Promise<RegisterReadyVault> {
   const connection = provider.connection;
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(connection.rpcEndpoint);
+  const rpc = makeRateLimitedKitRpc(connection.rpcEndpoint);
 
   const identityClaim = new Uint8Array(32);
   crypto.getRandomValues(identityClaim);
@@ -509,5 +510,17 @@ export async function registerSessionV2(
     },
   );
   const signature = sig ?? "";
+  // CONFIRM-VISIBILITY CONTRACT: sendPrecompilePairResilient only runs its result
+  // poll on the transient-drop self-heal path; on the happy path (first send
+  // confirms) it returns WITHOUT polling. But on a lean RPC plan the just-created
+  // SessionAccount PDA may not be visible on the read replica yet — a caller that
+  // immediately `program.account.sessionAccount.fetch(sessionPda)` then hits
+  // "Account does not exist". So we ALWAYS wait here until the session PDA is
+  // visible and written (version != 0) before returning. Every caller inherits a
+  // read-your-writes guarantee; no per-call-site polling needed.
+  await pollUntilAccount(
+    () => program.account.sessionAccount.fetch(sessionPda),
+    (s: any) => s.version !== 0,
+  );
   return { sessionKeypair, signature, sessionPda, allowedCounterparty };
 }

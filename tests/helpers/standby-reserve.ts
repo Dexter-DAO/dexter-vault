@@ -58,6 +58,7 @@ import {
   buildSecp256r1VerifyInstruction,
   sendAddAuthorityResilient,
   sendPrecompilePairResilient,
+  makeRateLimitedKitRpc,
 } from "./secp256r1";
 import {
   fetchSwig,
@@ -65,7 +66,7 @@ import {
   getAddAuthorityInstructions,
 } from "@swig-wallet/kit";
 import { Actions, createEd25519AuthorityInfo } from "@swig-wallet/lib";
-import { address as kitAddress, createSolanaRpc } from "@solana/kit";
+import { address as kitAddress } from "@solana/kit";
 import { expect } from "chai";
 
 // ── (1) StandbyBacker PDA ────────────────────────────────────────────────────
@@ -140,7 +141,7 @@ export async function registerProgramAuthorityOnSwig(args: {
 }): Promise<number> {
   const { provider, swigAddress, vaultProgramId } = args;
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+  const rpc = makeRateLimitedKitRpc(provider.connection.rpcEndpoint);
 
   const swigForAdd = await fetchSwig(
     rpc as any,
@@ -246,7 +247,7 @@ async function sendVaultCpiSignV2(
   vaultIx: TransactionInstruction,
 ): Promise<void> {
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+  const rpc = makeRateLimitedKitRpc(provider.connection.rpcEndpoint);
 
   const swigForSign = await fetchSwig(
     rpc as any,

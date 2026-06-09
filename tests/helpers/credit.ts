@@ -46,6 +46,7 @@ import {
   sendAddAuthorityResilient,
   sendAndConfirmWithRetry,
   sendPrecompilePairResilient,
+  makeRateLimitedKitRpc,
 } from "./secp256r1";
 import {
   fetchSwig,
@@ -56,7 +57,7 @@ import {
   Actions,
   createProgramExecAuthorityInfo,
 } from "@swig-wallet/lib";
-import { address as kitAddress, createSolanaRpc } from "@solana/kit";
+import { address as kitAddress } from "@solana/kit";
 import {
   getTransferCheckedInstruction,
   TOKEN_PROGRAM_ADDRESS,
@@ -314,7 +315,7 @@ export async function drawCreditAtomic(
   } = args;
 
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+  const rpc = makeRateLimitedKitRpc(provider.connection.rpcEndpoint);
 
   const drawVaultIx = await program.methods
     .drawCredit({
@@ -393,7 +394,7 @@ export async function registerMarkerOnSwig(args: {
 }): Promise<number> {
   const { provider, swigAddress, vaultProgramId, discriminator } = args;
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+  const rpc = makeRateLimitedKitRpc(provider.connection.rpcEndpoint);
 
   const swigForAdd = await fetchSwig(
     rpc as any,
@@ -482,7 +483,7 @@ export async function repayCreditAtomic(
   } = args;
 
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+  const rpc = makeRateLimitedKitRpc(provider.connection.rpcEndpoint);
 
   const repayVaultIx = await program.methods
     .repayCredit({ amount: new anchor.BN(amount.toString()) })
@@ -573,7 +574,7 @@ export async function seizeCollateralAtomic(
   } = args;
 
   const wallet = (provider.wallet as anchor.Wallet).payer;
-  const rpc = createSolanaRpc(provider.connection.rpcEndpoint);
+  const rpc = makeRateLimitedKitRpc(provider.connection.rpcEndpoint);
 
   const seizeVaultIx = await program.methods
     .seizeCollateral({})

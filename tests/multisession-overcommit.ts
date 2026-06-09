@@ -492,8 +492,10 @@ describe("register_session_key — V6 multi-session overcommit gate (spec §7a)"
   //    sets its own Mocha timeout to cover the wait.
   // ───────────────────────────────────────────────────────────────────────────
   it("case 4 — expired sibling is SWEPT (cleared, not summed); B still registers", async function () {
-    // Real wall-clock wait → bump the per-test timeout well past the TTL.
-    this.timeout(180_000);
+    // Real wall-clock wait (a session expires to TTL) PLUS the RPC rate-limiter's
+    // pacing (~8 RPS) across this case's many calls → bump the per-test timeout
+    // well past the TTL. 180s was enough on a fast RPC; throttled, this needs more.
+    this.timeout(300_000);
 
     const SWEEP_TTL = 12; // seconds — short, but > finalized confirm jitter.
     const vault = await bootstrapForRegister(program, provider, {
@@ -561,8 +563,10 @@ describe("register_session_key — V6 multi-session overcommit gate (spec §7a)"
   //     This is the only constructible-on-chain gate error with no other coverage.
   // ───────────────────────────────────────────────────────────────────────────
   it("case 4d — expired sibling passed READ-ONLY → SessionAccountNotWritable (sweep can't clear a read-only acct)", async function () {
-    // Real wall-clock wait → bump the per-test timeout well past the TTL.
-    this.timeout(180_000);
+    // Real wall-clock wait (a session expires to TTL) PLUS the RPC rate-limiter's
+    // pacing (~8 RPS) across this case's many calls → bump the per-test timeout
+    // well past the TTL. 180s was enough on a fast RPC; throttled, this needs more.
+    this.timeout(300_000);
 
     const SWEEP_TTL = 12; // seconds — short, but > finalized confirm jitter.
     const vault = await bootstrapForRegister(program, provider, {
