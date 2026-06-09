@@ -119,51 +119,130 @@ pub struct RegisterSessionKeyArgs {
 ///    Use `revoke_session_key` first to tear down the prior session.
 ///  - An existing EXPIRED session is silently overwritten — that's how
 ///    sessions rotate.
-pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -> Result<()> {
-    let vault = &mut ctx.accounts.vault;
-
-    require!(vault.version == VAULT_VERSION_V4, VaultError::UnsupportedVaultVersion);
+pub fn handler<'info>(
+    ctx: Context<'_, '_, 'info, 'info, RegisterSessionKey<'info>>,
+    args: RegisterSessionKeyArgs,
+) -> Result<()> {
+    // ── A. expiry + max_amount / revolving sanity ───────────────────────────
+    require!(
+        ctx.accounts.vault.version == VAULT_VERSION_V4,
+        VaultError::UnsupportedVaultVersion
+    );
     require!(args.max_amount > 0, VaultError::SessionCapZero);
     require!(args.max_revolving_capacity > 0, VaultError::RevolvingCapacityZero);
-
-    // V0.3 Decision 1: the overcommit invariant. A new session cap plus
-    // existing outstanding locks must not exceed vault USDC balance.
-    // The ATA's `owner` is cross-checked against the canonical swig wallet
-    // PDA so a caller can't smuggle an unrelated funded ATA into the gate.
-    require!(
-        ctx.accounts.vault_usdc_ata.owner == ctx.accounts.swig_wallet_address.key(),
-        VaultError::PasskeyVerificationFailed
-    );
-    let combined = args
-        .max_amount
-        .checked_add(vault.outstanding_locked_amount)
-        .ok_or(VaultError::SessionWouldOvercommitVault)?;
-    require!(
-        combined <= ctx.accounts.vault_usdc_ata.amount,
-        VaultError::SessionWouldOvercommitVault
-    );
 
     let now = Clock::get()?.unix_timestamp;
     require!(args.expires_at > now, VaultError::SessionExpiryInPast);
 
-    if let Some(existing) = &vault.active_session {
-        // An expired session is OK to overwrite; an unexpired one isn't.
-        require!(existing.expires_at <= now, VaultError::SessionAlreadyActive);
+    // ── B. ATA-owner check (KEPT verbatim) ───────────────────────────────────
+    // The ATA's `owner` is cross-checked against the canonical swig wallet PDA
+    // so a caller can't smuggle an unrelated funded ATA into the overcommit gate.
+    require!(
+        ctx.accounts.vault_usdc_ata.owner == ctx.accounts.swig_wallet_address.key(),
+        VaultError::PasskeyVerificationFailed
+    );
+
+    // ── C. The overcommit gate (V6 SECURITY CORE) ────────────────────────────
+    // Copy the scalars the verify step needs before taking `&mut vault`, and
+    // capture the immutable reads the gate needs.
+    let vault_key = ctx.accounts.vault.key();
+    let passkey = ctx.accounts.vault.passkey_pubkey;
+    let live_session_count = ctx.accounts.vault.live_session_count;
+    let outstanding_locked_amount = ctx.accounts.vault.outstanding_locked_amount;
+    let ata_amount = ctx.accounts.vault_usdc_ata.amount;
+
+    let session_key = ctx.accounts.session.key();
+    let is_new = ctx.accounts.session.version == 0;
+
+    require!(live_session_count < 255, VaultError::SessionCountAtMax);
+
+    // overcommit gate over sibling sessions
+    let mut sibling_sum: u64 = 0;
+    let mut counted: u8 = 0;
+    let mut prev: Option<Pubkey> = None;
+    for acct in ctx.remaining_accounts.iter() {
+        let acct_key = *acct.key;
+        // (i) STRICT ascending → dedup + canonical order in one check. `>` not `>=`.
+        if let Some(p) = prev {
+            require!(acct_key > p, VaultError::SessionAccountsNotSorted);
+        }
+        prev = Some(acct_key);
+        // (ii) the target's own PDA must NOT appear in the sibling set
+        require_keys_neq!(acct_key, session_key, VaultError::SessionAccountMisderived);
+        // (iii) owner + discriminator + deserialize (read-only). Account::try_from
+        //       checks owner==program + the 8-byte discriminator.
+        let sib = Account::<SessionAccount>::try_from(acct)
+            .map_err(|_| error!(VaultError::SessionAccountForeign))?;
+        // (iv) vault-bound + PDA re-derive via STORED bump (create_program_address,
+        //      NOT find_program_address — avoids the ~1500 CU bump search per sibling)
+        require_keys_eq!(sib.vault, vault_key, VaultError::SessionAccountForeign);
+        let expected = Pubkey::create_program_address(
+            &[
+                crate::constants::SESSION_SEED,
+                vault_key.as_ref(),
+                sib.session.allowed_counterparty.as_ref(),
+                &[sib.bump],
+            ],
+            ctx.program_id,
+        )
+        .map_err(|_| error!(VaultError::SessionAccountMisderived))?;
+        require_keys_eq!(acct_key, expected, VaultError::SessionAccountMisderived);
+        // (v) only LIVE siblings count + sum (same liveness filter live_session_count uses)
+        if sib.session.expires_at > now {
+            sibling_sum = sibling_sum
+                .checked_add(sib.session.max_amount)
+                .ok_or(error!(VaultError::SessionWouldOvercommitVault))?;
+            counted = counted
+                .checked_add(1)
+                .ok_or(error!(VaultError::SessionWouldOvercommitVault))?;
+        }
     }
 
+    // (vi) completeness: caller passed exactly the live siblings.
+    //   expected_siblings = live_session_count − (target already exists ? 1 : 0)
+    let expected_siblings = live_session_count
+        .checked_sub(if is_new { 0 } else { 1 })
+        .ok_or(error!(VaultError::IncompleteSessionSet))?;
+    require!(counted == expected_siblings, VaultError::IncompleteSessionSet);
+
+    // (vii) overcommit invariant: siblings + the NEW cap + outstanding_locked <= USDC
+    let combined = sibling_sum
+        .checked_add(args.max_amount)
+        .and_then(|s| s.checked_add(outstanding_locked_amount))
+        .ok_or(error!(VaultError::SessionWouldOvercommitVault))?;
+    require!(
+        combined <= ata_amount,
+        VaultError::SessionWouldOvercommitVault
+    );
+
+    // ── D. passkey verify (KEPT) ─────────────────────────────────────────────
     // Reconstruct the 188-byte registration message the passkey signed.
-    let registration_message =
-        build_registration_message(ctx.program_id, &vault.key(), &args);
+    let registration_message = build_registration_message(ctx.program_id, &vault_key, &args);
 
     verify_passkey_signed(
         &ctx.accounts.instructions_sysvar,
-        &vault.passkey_pubkey,
+        &passkey,
         &args.client_data_json,
         &args.authenticator_data,
         &registration_message,
     )?;
 
-    vault.active_session = Some(SessionRegistration {
+    // ── E. first-touch + full-overwrite write (replaces vault.active_session) ─
+    if is_new {
+        let vault = &mut ctx.accounts.vault;
+        vault.live_session_count = vault
+            .live_session_count
+            .checked_add(1)
+            .ok_or(error!(VaultError::SessionCountAtMax))?;
+    }
+    let session = &mut ctx.accounts.session;
+    if is_new {
+        session.version = SESSION_VERSION_V1;
+        session.bump = ctx.bumps.session;
+        session.vault = vault_key;
+    }
+    // FULL overwrite of every passkey-endorsed scope field + reset meters (SOL-010 Mode-B)
+    session.session = SessionRegistration {
         session_pubkey: args.session_pubkey,
         max_amount: args.max_amount,
         expires_at: args.expires_at,
@@ -174,7 +253,7 @@ pub fn handler(ctx: Context<RegisterSessionKey>, args: RegisterSessionKeyArgs) -
         max_revolving_capacity: args.max_revolving_capacity,
         crystallized_cumulative: 0,
         last_locked_sequence: 0,
-    });
+    };
 
     Ok(())
 }

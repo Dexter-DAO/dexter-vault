@@ -68,8 +68,8 @@ pub mod dexter_vault {
         instructions::prove_passkey::handler(ctx, args)
     }
 
-    pub fn register_session_key(
-        ctx: Context<RegisterSessionKey>,
+    pub fn register_session_key<'info>(
+        ctx: Context<'_, '_, 'info, 'info, RegisterSessionKey<'info>>,
         args: RegisterSessionKeyArgs,
     ) -> Result<()> {
         instructions::register_session_key::handler(ctx, args)
