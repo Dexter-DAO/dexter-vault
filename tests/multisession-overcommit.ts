@@ -170,6 +170,27 @@ async function registerRaw(
   return { signature: sig ?? "", sessionPda };
 }
 
+/** Busy-wait until the ON-CHAIN (cluster) clock passes `deadlineSec`. The gate
+ *  compares sib.session.expires_at > Clock::get().unix_timestamp, so expiry must
+ *  be observed against the cluster clock — getBlockTime of the latest finalized
+ *  slot — NOT the local wall clock. We wait until blockTime > deadline + 2 to
+ *  clear finalized-confirm jitter. Real on-chain time; nothing is faked. Shared
+ *  by case 4 (happy expired-sweep) and case 4d (read-only expired sibling) so
+ *  the wait logic lives in exactly one place. */
+async function waitForExpiry(
+  provider: anchor.AnchorProvider,
+  deadlineSec: number,
+): Promise<void> {
+  /* eslint-disable no-await-in-loop */
+  for (let i = 0; i < 60; i++) {
+    const slot = await provider.connection.getSlot("finalized");
+    const blockTime = await provider.connection.getBlockTime(slot);
+    if (blockTime !== null && blockTime > deadlineSec + 2) break;
+    await new Promise((r) => setTimeout(r, 3_000));
+  }
+  /* eslint-enable no-await-in-loop */
+}
+
 /** A live SessionAccount AccountMeta, read-only (the gate keeps live siblings
  *  read-only). */
 function liveMeta(pubkey: PublicKey): AccountMeta {
@@ -400,12 +421,20 @@ describe("register_session_key — V6 multi-session overcommit gate (spec §7a)"
   //    guard at (ii): an account that equals the target session PDA. We exercise
   //    the address-mismatch limb via a fresh non-PDA SessionAccount-shaped meta:
   //    the simplest concrete construction is a random Keypair pubkey, which is
-  //    system-owned and trips Account::try_from → SessionAccountForeign. Because
-  //    a genuine address-≠-derivation cannot be manufactured on-chain (the PDA
-  //    constraint binds them), we assert the reachable owner/foreign limb here
-  //    and document that the pure (iv) mismatch is unreachable by construction.
+  //    system-owned and ALWAYS trips Account::try_from (owner/discriminator) →
+  //    SessionAccountForeign FIRST, before the create_program_address re-derive at
+  //    step (iv) is ever reached. So the reachable error here is
+  //    SessionAccountForeign ONLY — we assert exactly that.
+  //
+  //    The pure-Misderived (iv) limb — the create_program_address mismatch at
+  //    register_session_key.rs:202 — is UNCONSTRUCTIBLE on-chain: a real
+  //    SessionAccount's address IS its PDA (the PDA constraint binds address to
+  //    derivation), so no legitimately-created account can present an
+  //    address ≠ create_program_address(seed, stored bump). That limb is covered
+  //    by code review + a future Rust unit test — the same posture as the at-max
+  //    (case 9) boundary.
   // ───────────────────────────────────────────────────────────────────────────
-  it("case 3 — misderived/non-PDA sibling: random address → SessionAccountForeign (PDA mismatch unreachable by construction)", async () => {
+  it("case 3 — non-PDA sibling: random address → SessionAccountForeign (pure (iv) PDA-mismatch unconstructible on-chain; covered by review + future Rust unit test)", async () => {
     const vault = await bootstrapForRegister(program, provider, {
       usdcFundingAmount: 10_000_000n,
       migrateTo: 6,
@@ -435,14 +464,14 @@ describe("register_session_key — V6 multi-session overcommit gate (spec §7a)"
         allowedCounterparty: cpB,
         remaining,
       });
-      expect.fail("expected SessionAccountForeign (or SessionAccountMisderived)");
+      expect.fail("expected SessionAccountForeign");
     } catch (err: any) {
-      // Accept either: a non-PDA system account fails owner/discriminator
-      // (Foreign) before the PDA re-derive (Misderived) can fire. Both prove the
-      // address-binding limb of the gate rejects an unbound sibling.
-      expect(err.toString()).to.match(
-        /SessionAccountForeign|SessionAccountMisderived/,
-      );
+      // A non-PDA system account fails owner/discriminator (Foreign) BEFORE the
+      // PDA re-derive (Misderived) limb (iv) can fire — so Foreign is the ONLY
+      // reachable error here. The pure (iv) create_program_address mismatch is
+      // unconstructible on-chain (see block comment) and is covered by review +
+      // a future Rust unit test.
+      expect(err.toString()).to.match(/SessionAccountForeign/);
     }
   });
 
@@ -484,18 +513,8 @@ describe("register_session_key — V6 multi-session overcommit gate (spec §7a)"
     let v: any = await program.account.vault.fetch(vault.vaultPda);
     expect(v.liveSessionCount).to.equal(1);
 
-    // ── Busy-wait until the ON-CHAIN clock passes A's expiry. The gate compares
-    //    sib.session.expires_at > Clock::get().unix_timestamp, so we must wait on
-    //    the cluster clock (getBlockTime of the latest slot), not the local one.
-    const deadline = Number(expiresAt);
-    /* eslint-disable no-await-in-loop */
-    for (let i = 0; i < 60; i++) {
-      const slot = await provider.connection.getSlot("finalized");
-      const blockTime = await provider.connection.getBlockTime(slot);
-      if (blockTime !== null && blockTime > deadline + 2) break;
-      await new Promise((r) => setTimeout(r, 3_000));
-    }
-    /* eslint-enable no-await-in-loop */
+    // ── Wait until the ON-CHAIN clock passes A's expiry (shared waitForExpiry).
+    await waitForExpiry(provider, Number(expiresAt));
 
     // B: pass the now-EXPIRED A, marked WRITABLE (the sweep clears it). cap $4.
     const b = await registerSessionV2(program, provider, {
@@ -520,6 +539,79 @@ describe("register_session_key — V6 multi-session overcommit gate (spec §7a)"
     expect(bAcct.session.maxAmount.toString()).to.equal("4000000");
 
     // Count re-synced: started 1, swept A (−1), first-touch B (+1) → 1.
+    v = await program.account.vault.fetch(vault.vaultPda);
+    expect(v.liveSessionCount).to.equal(1);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 4d. EXPIRED SIBLING, READ-ONLY — the FAILURE side of case 4's writability
+  //     guard. The gate's sweep path clears (zeroes) an expired sibling in place,
+  //     which it can only do if the account is WRITABLE; before sweeping it
+  //     asserts require!(acct.is_writable, SessionAccountNotWritable) (error
+  //     6038). Case 4 proves the guard from the SUCCESS side (expired + writable →
+  //     swept). This case proves it from the FAILURE side: pass the SAME kind of
+  //     genuinely-expired sibling but marked READ-ONLY, and the gate must reject
+  //     with SessionAccountNotWritable rather than silently skipping the clear.
+  //
+  //     CONSTRUCTION: the normal siblingRemainingAccounts helper marks an
+  //     isExpired sibling WRITABLE (that's the happy path it's built for), so we
+  //     cannot express "expired but read-only" through registerSessionV2. We go
+  //     through the registerRaw driver with a HAND-BUILT AccountMeta whose
+  //     isWritable is false (liveMeta — read-only) on the genuinely-expired A.
+  //     This is the only constructible-on-chain gate error with no other coverage.
+  // ───────────────────────────────────────────────────────────────────────────
+  it("case 4d — expired sibling passed READ-ONLY → SessionAccountNotWritable (sweep can't clear a read-only acct)", async function () {
+    // Real wall-clock wait → bump the per-test timeout well past the TTL.
+    this.timeout(180_000);
+
+    const SWEEP_TTL = 12; // seconds — short, but > finalized confirm jitter.
+    const vault = await bootstrapForRegister(program, provider, {
+      usdcFundingAmount: 10_000_000n,
+      migrateTo: 6,
+    });
+
+    const cpA = Keypair.generate().publicKey;
+    const cpB = Keypair.generate().publicKey;
+
+    // A: live, expires at now + SWEEP_TTL. cap $3 — identical shape to case 4.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expiresAt = BigInt(nowSec + SWEEP_TTL);
+    const a = await registerA(vault, 3_000_000n, cpA, { expiresAt });
+
+    let v: any = await program.account.vault.fetch(vault.vaultPda);
+    expect(v.liveSessionCount).to.equal(1);
+
+    // Wait out A on the cluster clock (shared with case 4).
+    await waitForExpiry(provider, Number(expiresAt));
+
+    // B: pass the now-EXPIRED A but READ-ONLY (liveMeta → isWritable:false). The
+    // sweep needs to zero A in place; a read-only account can't be persisted, so
+    // the gate's require!(acct.is_writable, ...) fires → SessionAccountNotWritable.
+    // We MUST use registerRaw here: registerSessionV2's helper would mark an
+    // isExpired sibling writable, hiding the very condition under test.
+    const remaining = [liveMeta(a.sessionPda)];
+
+    try {
+      await registerRaw(program, provider, {
+        vaultPda: vault.vaultPda,
+        passkey: vault.passkey,
+        vaultUsdcAta: vault.sourceAta,
+        swigAddress: vault.swigAddress,
+        swigWalletAddress: vault.swigWalletAddress,
+        maxAmount: 1_000_000n,
+        maxRevolvingCapacity: 1_000_000n,
+        allowedCounterparty: cpB,
+        remaining,
+      });
+      expect.fail("expected SessionAccountNotWritable");
+    } catch (err: any) {
+      expect(err.toString()).to.match(/SessionAccountNotWritable/);
+    }
+
+    // A was NOT swept (the tx reverted): it remains live (version != 0) and the
+    // count is unchanged.
+    const aAfter: any = await program.account.sessionAccount.fetch(a.sessionPda);
+    expect(aAfter.version).to.not.equal(0);
     v = await program.account.vault.fetch(vault.vaultPda);
     expect(v.liveSessionCount).to.equal(1);
   });
