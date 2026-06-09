@@ -55,6 +55,6 @@ pub fn handler(ctx: Context<InitializeVault>, args: InitializeVaultArgs) -> Resu
     vault.pending_withdrawal = None;
     vault.identity_claim = args.identity_claim;
     vault.dexter_authority = ctx.accounts.dexter_authority.key();
-    vault.active_session = None;
+    vault.live_session_count = 0;
     Ok(())
 }

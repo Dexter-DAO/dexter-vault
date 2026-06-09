@@ -135,6 +135,43 @@ struct VaultV4 {
     total_settled_amount: u64,
 }
 
+/// # DANGER — frozen V5 WRITER snapshot (immune to V6 reshape)
+///
+/// `VaultV5Frozen` is a HAND-FROZEN snapshot of the V5 on-chain layout used ONLY
+/// to RE-ENCODE this migration's output. This migration runs on MAINNET and MUST
+/// emit a byte-identical V5 layout regardless of how the live `Vault` struct
+/// changes in later versions (V6 dropped `active_session` for
+/// `live_session_count`). We can no longer build a `Vault { active_session, ... }`
+/// literal, so we write through this frozen V5 shape instead.
+///
+/// Safe invariant: `VaultV5Frozen` MUST match the PRE-V6 `Vault` layout EXACTLY
+/// (the struct at commit 7b5139c^, before the V6 reshape), in field order and
+/// type: the V4 shape (`active_session` + the three LockedClaim odometers) PLUS
+/// the four V5 credit fields (`borrowed`, `standby_backer`, `standby_cap`,
+/// `borrow_recovery_at`). `SessionRegistration` and `PendingWithdrawal` are
+/// unchanged at V5, so the frozen writer reuses the canonical `crate::state::*`
+/// structs.
+#[derive(AnchorSerialize, AnchorDeserialize, InitSpace)]
+struct VaultV5Frozen {
+    version: u8,
+    bump: u8,
+    passkey_pubkey: [u8; 33],
+    swig_address: Pubkey,
+    cooling_off_seconds: u32,
+    pending_voucher_count: u32,
+    pending_withdrawal: Option<PendingWithdrawal>,
+    identity_claim: [u8; 32],
+    dexter_authority: Pubkey,
+    active_session: Option<SessionRegistration>,
+    outstanding_locked_amount: u64,
+    total_crystallized_amount: u64,
+    total_settled_amount: u64,
+    borrowed: u64,
+    standby_backer: Option<Pubkey>,
+    standby_cap: u64,
+    borrow_recovery_at: Option<i64>,
+}
+
 pub fn handler(ctx: Context<MigrateV4ToV5>, _args: MigrateV4ToV5Args) -> Result<()> {
     let vault_ai = &ctx.accounts.vault;
 
@@ -161,8 +198,11 @@ pub fn handler(ctx: Context<MigrateV4ToV5>, _args: MigrateV4ToV5Args) -> Result<
         VaultError::PasskeyVerificationFailed
     );
 
-    // ---- (3) re-encode as the current (V5) Vault, new fields neutral ------
-    let v5 = Vault {
+    // ---- (3) re-encode as the frozen V5 Vault, new fields neutral --------
+    // We write through `VaultV5Frozen` (not the live `Vault`) so this migration
+    // emits a byte-identical V5 layout even after the live struct reshapes in
+    // later versions (V6 dropped `active_session` for `live_session_count`).
+    let v5 = VaultV5Frozen {
         version: VAULT_VERSION_V5,
         bump: v4.bump,
         passkey_pubkey: v4.passkey_pubkey,
@@ -191,7 +231,7 @@ pub fn handler(ctx: Context<MigrateV4ToV5>, _args: MigrateV4ToV5Args) -> Result<
     // trailing V5 fields, well under MAX_PERMITTED_DATA_INCREASE. `resize`
     // zero-extends the grown region; step (5) then overwrites the whole buffer
     // with the V5 encoding, so the zero-extension is just to make room.
-    let new_size = 8 + Vault::INIT_SPACE;
+    let new_size = 8 + VaultV5Frozen::INIT_SPACE;
     let old_size = vault_ai.data_len();
     if new_size > old_size {
         let rent = Rent::get()?;

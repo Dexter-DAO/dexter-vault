@@ -158,6 +158,42 @@ struct VaultV3 {
     active_session: Option<SessionRegistrationV3>,
 }
 
+/// # DANGER — frozen V4 WRITER snapshot (immune to V6 reshape)
+///
+/// `VaultV4Frozen` is a HAND-FROZEN snapshot of the V4 on-chain layout used ONLY
+/// to RE-ENCODE this migration's output. This migration runs on MAINNET and MUST
+/// emit a byte-identical V4 layout regardless of how the live `Vault` struct
+/// changes in later versions (V5, V6, ...). The live `Vault` struct no longer
+/// carries `active_session` (V6 replaced it with `live_session_count`), so we can
+/// no longer build a `Vault { active_session, ... }` literal here. We write
+/// through this frozen V4 shape instead.
+///
+/// Safe invariant: `VaultV4Frozen` MUST match the V4 on-chain layout EXACTLY, in
+/// field order and type. It is the same field set as `migrate_v4_to_v5`'s frozen
+/// `VaultV4` READER (both describe the identical V4 layout): the pre-V5 `Vault`
+/// shape — `active_session` plus the three V4 LockedClaim odometers, but NONE of
+/// the V5 credit fields (`borrowed`, `standby_backer`, `standby_cap`,
+/// `borrow_recovery_at`).
+///
+/// `SessionRegistration` and `PendingWithdrawal` are unchanged at V4, so the
+/// frozen writer reuses the canonical `crate::state::*` structs.
+#[derive(AnchorSerialize, AnchorDeserialize, InitSpace)]
+struct VaultV4Frozen {
+    version: u8,
+    bump: u8,
+    passkey_pubkey: [u8; 33],
+    swig_address: Pubkey,
+    cooling_off_seconds: u32,
+    pending_voucher_count: u32,
+    pending_withdrawal: Option<PendingWithdrawal>,
+    identity_claim: [u8; 32],
+    dexter_authority: Pubkey,
+    active_session: Option<SessionRegistration>,
+    outstanding_locked_amount: u64,
+    total_crystallized_amount: u64,
+    total_settled_amount: u64,
+}
+
 pub fn handler(ctx: Context<MigrateV3ToV4>, _args: MigrateV3ToV4Args) -> Result<()> {
     let vault_ai = &ctx.accounts.vault;
 
@@ -184,8 +220,12 @@ pub fn handler(ctx: Context<MigrateV3ToV4>, _args: MigrateV3ToV4Args) -> Result<
         VaultError::PasskeyVerificationFailed
     );
 
-    // ---- (3) re-encode as the current (V4) Vault, new fields = 0 ----------
-    let v4 = Vault {
+    // ---- (3) re-encode as the frozen V4 Vault, new fields = 0 -------------
+    // We write through `VaultV4Frozen` (not the live `Vault`) so this migration
+    // emits a byte-identical V4 layout even after the live struct reshapes in
+    // later versions (V6 dropped `active_session`). This migration emits a V4
+    // vault with NO V5 credit fields — those are appended only by the V4->V5 path.
+    let v4 = VaultV4Frozen {
         version: VAULT_VERSION_V4,
         bump: v3.bump,
         passkey_pubkey: v3.passkey_pubkey,
@@ -213,13 +253,6 @@ pub fn handler(ctx: Context<MigrateV3ToV4>, _args: MigrateV3ToV4Args) -> Result<
         outstanding_locked_amount: 0,
         total_crystallized_amount: 0,
         total_settled_amount: 0,
-        // V5 credit accounting: this migration emits a V4 vault with no credit
-        // enabled, so the standby fields are neutral (no backer, nothing
-        // borrowed). A separate V4->V5 path will set these when credit is opened.
-        borrowed: 0,
-        standby_backer: None,
-        standby_cap: 0,
-        borrow_recovery_at: None,
     };
 
     // ---- (4) realloc to the V4 size, topping up rent ----------------------
@@ -228,7 +261,7 @@ pub fn handler(ctx: Context<MigrateV3ToV4>, _args: MigrateV3ToV4Args) -> Result<
     // well under MAX_PERMITTED_DATA_INCREASE. `resize` zero-extends the grown
     // region; step (5) then overwrites the whole buffer with the V4 encoding, so
     // the zero-extension is just to make room.
-    let new_size = 8 + Vault::INIT_SPACE;
+    let new_size = 8 + VaultV4Frozen::INIT_SPACE;
     let old_size = vault_ai.data_len();
     if new_size > old_size {
         let rent = Rent::get()?;
