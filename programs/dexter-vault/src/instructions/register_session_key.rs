@@ -156,9 +156,20 @@ pub fn handler<'info>(
 
     require!(live_session_count < 255, VaultError::SessionCountAtMax);
 
-    // overcommit gate over sibling sessions
+    // overcommit gate over sibling sessions — with EXPIRED-SIBLING SWEEP (V6 fix).
+    //
+    // EXPIRY-RECONCILE: a session can leave the live set by PASSIVE wall-clock
+    // expiry, which decrements nothing. So `live_session_count` can exceed the true
+    // live set, and a live-only completeness check would never hold once any sibling
+    // expired → permanent fail-closed DoS. FIX: the caller now passes the COMPLETE
+    // set of OTHER siblings (BOTH live AND expired). The gate SUMS+COUNTS the live
+    // ones, and CLEARS (version→0, zero the SessionRegistration) + COUNTS-as-swept
+    // the expired ones, then re-syncs `live_session_count -= swept`. Self-healing,
+    // un-gameable (an expired sibling is only swept AFTER the full owner/discriminator/
+    // vault-bind/PDA-rederive stack; the partition reads on-chain `expires_at`).
     let mut sibling_sum: u64 = 0;
-    let mut counted: u8 = 0;
+    let mut live_counted: u8 = 0; // live siblings passed
+    let mut swept: u8 = 0; // expired siblings cleared this call
     let mut prev: Option<Pubkey> = None;
     for acct in ctx.remaining_accounts.iter() {
         let acct_key = *acct.key;
@@ -169,9 +180,11 @@ pub fn handler<'info>(
         prev = Some(acct_key);
         // (ii) the target's own PDA must NOT appear in the sibling set
         require_keys_neq!(acct_key, session_key, VaultError::SessionAccountMisderived);
-        // (iii) owner + discriminator + deserialize (read-only). Account::try_from
-        //       checks owner==program + the 8-byte discriminator.
-        let sib = Account::<SessionAccount>::try_from(acct)
+        // (iii) owner + discriminator + deserialize. Account::try_from checks
+        //       owner==program + the 8-byte discriminator. The data borrow it takes
+        //       is released when this call returns (the deserialized value is OWNED),
+        //       so the later mutable re-borrow for the sweep cannot conflict.
+        let mut sib = Account::<SessionAccount>::try_from(acct)
             .map_err(|_| error!(VaultError::SessionAccountForeign))?;
         // (iv) vault-bound + PDA re-derive via STORED bump (create_program_address,
         //      NOT find_program_address — avoids the ~1500 CU bump search per sibling)
@@ -187,25 +200,60 @@ pub fn handler<'info>(
         )
         .map_err(|_| error!(VaultError::SessionAccountMisderived))?;
         require_keys_eq!(acct_key, expected, VaultError::SessionAccountMisderived);
-        // (v) only LIVE siblings count + sum (same liveness filter live_session_count uses)
+        // (v) PARTITION: live → sum + count; expired → SWEEP (clear + persist + count).
         if sib.session.expires_at > now {
             sibling_sum = sibling_sum
                 .checked_add(sib.session.max_amount)
                 .ok_or(error!(VaultError::SessionWouldOvercommitVault))?;
-            counted = counted
+            live_counted = live_counted
+                .checked_add(1)
+                .ok_or(error!(VaultError::SessionWouldOvercommitVault))?;
+        } else {
+            // EXPIRED sibling → sweep it. The clear must PERSIST to the account, which
+            // requires the account be writable; a read-only expired sibling can't be
+            // cleared, so reject it clearly (the caller must mark expired siblings
+            // writable; live siblings may stay read-only).
+            require!(acct.is_writable, VaultError::SessionAccountNotWritable);
+            // Clear in the owned wrapper: zero the version (so the next register sees
+            // version==0 = "new" and the gate sees it as not-live) and zero every
+            // SessionRegistration field (kill stale scope/meters — revival-class defense).
+            sib.version = 0;
+            sib.session = SessionRegistration {
+                session_pubkey: [0u8; 32],
+                max_amount: 0,
+                expires_at: 0,
+                allowed_counterparty: Pubkey::default(),
+                nonce: 0,
+                spent: 0,
+                current_outstanding: 0,
+                max_revolving_capacity: 0,
+                crystallized_cumulative: 0,
+                last_locked_sequence: 0,
+            };
+            // PERSIST: Account::exit serializes the mutated body (discriminator + data)
+            // back into the account via AccountSerialize. It only writes when
+            // owner==program_id and the account isn't closed — both hold here (try_from
+            // proved program ownership; create_program_address proved it's a real PDA).
+            sib.exit(ctx.program_id)?;
+            swept = swept
                 .checked_add(1)
                 .ok_or(error!(VaultError::SessionWouldOvercommitVault))?;
         }
     }
 
-    // (vi) completeness: caller passed exactly the live siblings.
-    //   expected_siblings = live_session_count − (target already exists ? 1 : 0)
-    let expected_siblings = live_session_count
+    // (vi) completeness over the FULL sibling set (live + expired). The caller must
+    //   pass every other sibling; ascending-order (i) prevents dups, this prevents
+    //   omission. expected_total = live_session_count − (target already exists ? 1 : 0)
+    let total_passed = live_counted
+        .checked_add(swept)
+        .ok_or(error!(VaultError::IncompleteSessionSet))?;
+    let expected_total = live_session_count
         .checked_sub(if is_new { 0 } else { 1 })
         .ok_or(error!(VaultError::IncompleteSessionSet))?;
-    require!(counted == expected_siblings, VaultError::IncompleteSessionSet);
+    require!(total_passed == expected_total, VaultError::IncompleteSessionSet);
 
-    // (vii) overcommit invariant: siblings + the NEW cap + outstanding_locked <= USDC
+    // (vii) overcommit invariant: LIVE siblings + the NEW cap + outstanding_locked
+    //   <= USDC. (expired siblings contribute 0 — they were swept, not summed.)
     let combined = sibling_sum
         .checked_add(args.max_amount)
         .and_then(|s| s.checked_add(outstanding_locked_amount))
@@ -227,13 +275,24 @@ pub fn handler<'info>(
         &registration_message,
     )?;
 
-    // ── E. first-touch + full-overwrite write (replaces vault.active_session) ─
-    if is_new {
+    // ── E. count re-sync + first-touch + full-overwrite write ─────────────────
+    {
         let vault = &mut ctx.accounts.vault;
+        // (E.0) RE-SYNC: subtract the swept (now-cleared) expired siblings. After
+        //   this, live_session_count reflects the TRUE live set. Done before the
+        //   first-touch increment so the order of operations is unambiguous; both
+        //   read/write the same field on the now-mutable vault borrow.
         vault.live_session_count = vault
             .live_session_count
-            .checked_add(1)
-            .ok_or(error!(VaultError::SessionCountAtMax))?;
+            .checked_sub(swept)
+            .ok_or(error!(VaultError::IncompleteSessionSet))?;
+        // (E.1) first-touch increment for a brand-new counterparty PDA.
+        if is_new {
+            vault.live_session_count = vault
+                .live_session_count
+                .checked_add(1)
+                .ok_or(error!(VaultError::SessionCountAtMax))?;
+        }
     }
     let session = &mut ctx.accounts.session;
     if is_new {

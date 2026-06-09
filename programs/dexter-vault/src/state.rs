@@ -338,4 +338,6 @@ pub enum VaultError {
     // shared consent rule across both financier-facing instructions.
     #[msg("financier consent missing: set_standby_reserve / close_standby (financier) must run as the inner CPI of the financier's swig SignV2 (swig_wallet must sign)")]
     FinancierConsentMissing,
+    #[msg("an expired sibling session must be passed WRITABLE so the register-time sweep can clear it")]
+    SessionAccountNotWritable,
 }
