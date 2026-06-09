@@ -12,3 +12,8 @@ pub const SWIG_PROGRAM_ID: Pubkey = pubkey!("swigypWHEksbC64pWKwah1WTeh9JXwx8H1r
 /// `[b"swig-wallet-address", swig_pubkey]` under SWIG_PROGRAM_ID. Sourced
 /// from /tmp/swig-wallet/state/src/swig.rs:50 (swig_wallet_address_seeds).
 pub const SWIG_WALLET_ADDRESS_SEED: &[u8] = b"swig-wallet-address";
+
+/// Session PDA seed prefix. A per-counterparty session lives at
+/// `[SESSION_SEED, vault_pubkey, allowed_counterparty]` under this program.
+/// One session per (vault, counterparty); re-register replaces in place.
+pub const SESSION_SEED: &[u8] = b"session";

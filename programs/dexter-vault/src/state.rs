@@ -23,6 +23,16 @@ pub const VAULT_VERSION_V4: u8 = 4;
 /// V5 is reached only by migration (migrate_v4_to_v5), never at init.
 pub const VAULT_VERSION_V5: u8 = 5;
 
+/// V6 moves sessions OUT of the Vault into per-counterparty SessionAccount PDAs.
+/// The Vault loses `active_session` (the Option) and gains `live_session_count: u8`.
+/// New vaults still init as V4; V6 is reached only by migration (migrate_v5_to_v6).
+pub const VAULT_VERSION_V6: u8 = 6;
+
+/// SessionAccount layout version. ZERO on a freshly-created (runtime-zeroed)
+/// account; set to this on first touch. The register handler reads `version == 0`
+/// to distinguish "new create" (increment count) from "replace" (count unchanged).
+pub const SESSION_VERSION_V1: u8 = 1;
+
 #[account]
 #[derive(InitSpace)]
 pub struct Vault {
@@ -47,12 +57,12 @@ pub struct Vault {
     /// The session authority recorded at init — the ONLY key permitted to
     /// mutate `pending_voucher_count` (settle_voucher / force_release).
     pub dexter_authority: Pubkey,
-    /// Currently-authorized session key, if any. Written by `register_session_key`
-    /// (passkey-signed), cleared by `revoke_session_key` (passkey-signed) or by
-    /// the program when expiry is observed during a future read. v2 enforces
-    /// at most one active session per vault; multi-seller / multi-session is
-    /// future work (issue #5).
-    pub active_session: Option<SessionRegistration>,
+    /// V6: number of LIVE session PDAs for this vault. Incremented by
+    /// register_session_key on first-touch (new counterparty), decremented by
+    /// revoke_session_key. The register-time overcommit gate requires the caller
+    /// to pass exactly this many live siblings (minus the target if it already
+    /// exists), so the summed-cap gate cannot be gamed low. Range 0..=255.
+    pub live_session_count: u8,
     /// Sum of unsettled LockedClaim amounts for this vault. Rises at
     /// `lock_voucher`, falls at `settle_locked_voucher` / `recover_abandoned_lock`.
     /// The crystallized (buyer-irrevocable) reservation tier. Read by
@@ -123,10 +133,31 @@ pub struct SessionRegistration {
     pub last_locked_sequence: u32,
 }
 
+/// A single authorized session, now a standalone account instead of a Vault
+/// field. PDA: seeds = [SESSION_SEED, vault.key(), session.allowed_counterparty].
+/// One per (vault, counterparty); the seed binding gives "one tab per app,
+/// re-register replaces in place". `version == 0` means freshly-created/cleared.
+#[account]
+#[derive(InitSpace)]
+pub struct SessionAccount {
+    /// First-touch / migration discriminator. 0 = never touched (or cleared by
+    /// revoke). SESSION_VERSION_V1 once written. NOT the Anchor discriminator
+    /// (Anchor sets that on init_if_needed before the handler runs) — this is a
+    /// program-controlled field, the only reliable new-vs-replace signal.
+    pub version: u8,
+    /// Stored canonical bump → create_program_address (one-shot, no ~1500 CU
+    /// find_program_address search) when re-deriving siblings in the gate.
+    pub bump: u8,
+    /// The vault this session authorizes spending FROM. Bound at first touch.
+    pub vault: Pubkey,
+    /// The session registration scope — UNCHANGED struct, reused verbatim.
+    pub session: SessionRegistration,
+}
+
 /// Crystallized claim against vault USDC. Created by `lock_voucher`,
 /// transferable via `transfer_lock_ownership`, settled by
 /// `settle_locked_voucher`, reclaimed by `recover_abandoned_lock`. Independent
-/// of `active_session` after creation — see V0.3 Decision 7. State machine
+/// of any `SessionAccount` after creation — see V0.3 Decision 7. State machine
 /// per V0.3 Decision 6: pending → {settled, abandoned}, both terminal one-way.
 #[account]
 #[derive(InitSpace)]
@@ -264,6 +295,16 @@ pub enum VaultError {
     WithdrawalWouldViolateReservation,
     #[msg("Registering this session would push max_amount + outstanding_locked_amount above vault USDC balance")]
     SessionWouldOvercommitVault,
+    #[msg("remaining_accounts not in strict ascending pubkey order (dedup/order)")]
+    SessionAccountsNotSorted,
+    #[msg("a passed session account belongs to a different vault")]
+    SessionAccountForeign,
+    #[msg("a passed account is not the canonical session PDA for its counterparty")]
+    SessionAccountMisderived,
+    #[msg("live sibling sessions passed != live_session_count (incomplete set)")]
+    IncompleteSessionSet,
+    #[msg("vault already has 255 live sessions; revoke one before registering")]
+    SessionCountAtMax,
     #[msg("holder_recovery_at must be strictly greater than maturity_at when both are set")]
     RecoveryBeforeMaturity,
     #[msg("Standby cap must be greater than zero.")]
