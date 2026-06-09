@@ -63,6 +63,7 @@ use crate::state::*;
 use crate::verify::ed25519::verify_session_signed;
 
 #[derive(Accounts)]
+#[instruction(args: SettleTabVoucherArgs)]
 pub struct SettleTabVoucher<'info> {
     /// Position 0 — REQUIRED at this index by Swig's ProgramExec authority
     /// validator. When a Swig::SignV2 follows this instruction in the same
@@ -98,6 +99,19 @@ pub struct SettleTabVoucher<'info> {
     )]
     pub vault: Account<'info, Vault>,
 
+    /// V6: the per-counterparty SessionAccount PDA this voucher settles
+    /// against. The session moved OUT of `vault.active_session` into this
+    /// PDA at `[SESSION_SEED, vault, allowed_counterparty]`. The seed binds
+    /// it to (vault, the seller named in the voucher), so a caller cannot
+    /// settle against a foreign counterparty's session. `mut` — we advance
+    /// the `spent` odometer and release `current_outstanding` in place.
+    #[account(
+        mut,
+        seeds = [crate::constants::SESSION_SEED, vault.key().as_ref(), args.allowed_counterparty.as_ref()],
+        bump = session.bump,
+    )]
+    pub session: Account<'info, SessionAccount>,
+
     /// Must equal `vault.dexter_authority` — only the recorded authority
     /// can drive the gate-counter decrement. The buyer's session-key
     /// signature is what authorizes the SPEND amount; this signer is what
@@ -129,29 +143,38 @@ pub struct SettleTabVoucherArgs {
     /// `spent` monotonicity check covers replay) but reserved for future
     /// out-of-order voucher detection.
     pub sequence_number: u32,
+
+    /// V6: the seller this voucher pays — equals the session PDA's
+    /// `allowed_counterparty`. Carried in the args so the accounts struct can
+    /// re-derive the session PDA seed. Not part of the signed voucher message
+    /// (the message layout is unchanged); the PDA seed binding is what ties
+    /// the settle to the correct session.
+    pub allowed_counterparty: Pubkey,
 }
 
 pub fn handler(ctx: Context<SettleTabVoucher>, args: SettleTabVoucherArgs) -> Result<()> {
-    let vault = &mut ctx.accounts.vault;
-
     require!(
-        vault.version == VAULT_VERSION_V4 || vault.version == VAULT_VERSION_V3 || vault.version == VAULT_VERSION_V2,
+        ctx.accounts.vault.version == VAULT_VERSION_V6,
         VaultError::UnsupportedVaultVersion
     );
     require!(
-        vault.swig_address != Pubkey::default(),
+        ctx.accounts.vault.swig_address != Pubkey::default(),
         VaultError::PasskeyVerificationFailed
     );
 
-    // The vault must have an active session — that's what we're settling
-    // against. revoke_session_key clears it, registration replaces it; both
-    // are passkey-signed, so the only way active_session is None or stale
-    // here is if the buyer explicitly cleared it.
-    let session = vault
-        .active_session
-        .as_ref()
-        .ok_or(VaultError::NoActiveSession)?
-        .clone();
+    // The named session PDA must be live/registered. version==0 means it was
+    // never touched, or already cleared by revoke / the register-time expiry
+    // sweep — settling against a dormant session is rejected. (V6 replacement
+    // for the old `vault.active_session.is_some()` check; the PDA's existence
+    // is proven by the seed constraint, its liveness by this guard.)
+    require!(
+        ctx.accounts.session.version != 0,
+        VaultError::NoActiveSession
+    );
+
+    // Snapshot the SessionRegistration for the read-only guards / verify. The
+    // mutation later takes a fresh &mut on the same account.
+    let session = ctx.accounts.session.session.clone();
 
     let now = Clock::get()?.unix_timestamp;
     require!(now < session.expires_at, VaultError::SessionExpiryInPast);
@@ -202,23 +225,26 @@ pub fn handler(ctx: Context<SettleTabVoucher>, args: SettleTabVoucherArgs) -> Re
         .checked_sub(session.spent)
         .ok_or(VaultError::InvalidVoucherSignature)?;
 
-    // Mutate the active session in place.
-    if let Some(active) = vault.active_session.as_mut() {
-        active.spent = args.cumulative_amount;
-        // Release exposure: the credex meter's FALL seam. `increment` is the
-        // USDC actually moving in THIS settle (atomic with the Swig transfer
-        // that follows), so capacity frees only against money that really
-        // settled. saturating_sub guards a stranded settle (no prior open).
-        active.current_outstanding = active.current_outstanding.saturating_sub(increment);
-    }
+    // Mutate the session registration in place on the PDA. The Option is gone
+    // in V6 — the PDA exists (seed constraint) and is live (version guard
+    // above), so this is unconditional. Metering math UNCHANGED.
+    let active = &mut ctx.accounts.session.session;
+    active.spent = args.cumulative_amount;
+    // Release exposure: the credex meter's FALL seam. `increment` is the
+    // USDC actually moving in THIS settle (atomic with the Swig transfer
+    // that follows), so capacity frees only against money that really
+    // settled. saturating_sub guards a stranded settle (no prior open).
+    active.current_outstanding = active.current_outstanding.saturating_sub(increment);
 
-    // Decrement the gate counter. The MppSession path's
+    // Decrement the gate counter (separate &mut borrow; different account).
+    // The MppSession path's
     // `pending_voucher_count` discipline applies here too: a tab open
     // incremented it (via vaultPendingVoucher.ts in the facilitator);
     // settling brings it back to zero. We saturate to be safe but expect
     // the count to be > 0 — if it's already zero, this is a stranded
     // settle (no open exists to balance) and we still allow it because
     // the session-key signature is sufficient authorization.
+    let vault = &mut ctx.accounts.vault;
     vault.pending_voucher_count = vault.pending_voucher_count.saturating_sub(1);
 
     Ok(())

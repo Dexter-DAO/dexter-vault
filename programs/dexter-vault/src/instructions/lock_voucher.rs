@@ -75,6 +75,18 @@ pub struct LockVoucher<'info> {
     )]
     pub swig_wallet_address: AccountInfo<'info>,
 
+    /// V6: the per-counterparty SessionAccount PDA whose meter graduates. The
+    /// session moved OUT of `vault.active_session` into this PDA at
+    /// `[SESSION_SEED, vault, allowed_counterparty]`. `mut` — the graduation
+    /// mutates `current_outstanding`, `crystallized_cumulative`, and
+    /// `last_locked_sequence` in place.
+    #[account(
+        mut,
+        seeds = [crate::constants::SESSION_SEED, vault.key().as_ref(), args.allowed_counterparty.as_ref()],
+        bump = session.bump,
+    )]
+    pub session: Account<'info, SessionAccount>,
+
     /// Claim PDA created in this instruction.
     #[account(
         init,
@@ -127,17 +139,21 @@ pub struct LockVoucherArgs {
     /// handler enforces `holder_recovery_at > maturity_at` per V0.3
     /// Decision 4.
     pub holder_recovery_at: Option<i64>,
+    /// V6: the seller this voucher's session is bound to — equals the session
+    /// PDA's `allowed_counterparty`. Carried in the args so the accounts
+    /// struct can re-derive the session PDA seed. Not part of the signed
+    /// voucher message (layout unchanged); the seed binding ties the lock to
+    /// the correct session.
+    pub allowed_counterparty: Pubkey,
 }
 
 pub fn handler(ctx: Context<LockVoucher>, args: LockVoucherArgs) -> Result<()> {
-    let vault = &mut ctx.accounts.vault;
-
     require!(
-        vault.version == VAULT_VERSION_V4,
+        ctx.accounts.vault.version == VAULT_VERSION_V6,
         VaultError::UnsupportedVaultVersion
     );
     require!(
-        vault.swig_address != Pubkey::default(),
+        ctx.accounts.vault.swig_address != Pubkey::default(),
         VaultError::PasskeyVerificationFailed
     );
 
@@ -156,11 +172,17 @@ pub fn handler(ctx: Context<LockVoucher>, args: LockVoucherArgs) -> Result<()> {
         VaultError::PasskeyVerificationFailed
     );
 
-    let session = vault
-        .active_session
-        .as_ref()
-        .ok_or(VaultError::NoActiveSession)?
-        .clone();
+    // The named session PDA must be live/registered (V6 replacement for the
+    // old `vault.active_session.is_some()` check). version==0 means cleared or
+    // never touched — locking against a dormant session is rejected.
+    require!(
+        ctx.accounts.session.version != 0,
+        VaultError::NoActiveSession
+    );
+
+    // Snapshot the SessionRegistration for the read-only guards / verify. The
+    // graduation mutation later takes a fresh &mut on the same account.
+    let session = ctx.accounts.session.session.clone();
 
     let now = Clock::get()?.unix_timestamp;
     require!(now < session.expires_at, VaultError::SessionExpiryInPast);
@@ -218,7 +240,9 @@ pub fn handler(ctx: Context<LockVoucher>, args: LockVoucherArgs) -> Result<()> {
     // V0.3 Decision 1 self-check: the post-lock outstanding must not exceed
     // the live USDC balance. vault_usdc_ata.amount is read live from the
     // SPL token account — never a cached field.
-    let proposed_outstanding = vault
+    let proposed_outstanding = ctx
+        .accounts
+        .vault
         .outstanding_locked_amount
         .checked_add(delta)
         .ok_or(VaultError::LockWouldOvercommitVault)?;
@@ -228,7 +252,11 @@ pub fn handler(ctx: Context<LockVoucher>, args: LockVoucherArgs) -> Result<()> {
     );
 
     // ── The graduation (seam spec §2). Atomic mutation of three fields. ──
-    if let Some(active) = vault.active_session.as_mut() {
+    // V6: the session-tier fields live on the PDA now. The Option is gone —
+    // the PDA exists (seed constraint) and is live (version guard above), so
+    // this is unconditional. Metering math UNCHANGED.
+    {
+        let active = &mut ctx.accounts.session.session;
         // Session-revocable tier falls. saturating_sub matches the
         // settle_tab_voucher precedent at line ~212: a stranded lock
         // (current_outstanding < delta) clamps to zero instead of
@@ -240,16 +268,21 @@ pub fn handler(ctx: Context<LockVoucher>, args: LockVoucherArgs) -> Result<()> {
         active.last_locked_sequence = args.sequence_number;
     }
 
-    vault.outstanding_locked_amount = proposed_outstanding;
-    vault.total_crystallized_amount = vault
-        .total_crystallized_amount
-        .saturating_add(delta);
+    // Vault-tier writes (separate &mut borrow; different account).
+    let vault_key = ctx.accounts.vault.key();
+    {
+        let vault = &mut ctx.accounts.vault;
+        vault.outstanding_locked_amount = proposed_outstanding;
+        vault.total_crystallized_amount = vault
+            .total_crystallized_amount
+            .saturating_add(delta);
+    }
 
     // Create the LockedClaim PDA in pending state per V0.3 Decision 6.
     let claim = &mut ctx.accounts.claim;
     claim.version = LOCKED_CLAIM_VERSION_V1;
     claim.bump = ctx.bumps.claim;
-    claim.vault = vault.key();
+    claim.vault = vault_key;
     claim.session_pubkey_at_lock = session.session_pubkey;
     claim.voucher_hash = args.voucher_hash;
     claim.amount = delta;
