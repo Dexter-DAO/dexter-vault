@@ -267,9 +267,11 @@ describe("V6 close_session — reclaim cleared session-PDA rent (0.5-T3)", () =>
       // PDA GONE (Anchor close: lamports drained, data resized to 0, owner →
       // System Program; the runtime reaps the 0-lamport account). Visibility-
       // polled: the read replica can lag the confirmed close by seconds.
+      // The poll IS the assertion: it throws on timeout. Do NOT re-read after
+      // it returns — the RPC is load-balanced and a second read can hit a
+      // STALE replica even after a fresh one served the truth (observed live:
+      // poll null → immediate re-read 2018400).
       await pollUntilGone(provider.connection, sessionPda);
-      const postAi = await provider.connection.getAccountInfo(sessionPda);
-      expect(postAi, "close_session must remove the PDA").to.be.null;
 
       // RENT LANDED on dexter_authority. The authority is also the fee payer,
       // so the observed delta is (sessionRent − txFee). When the happy-path
@@ -544,8 +546,8 @@ describe("V6 close_session — reclaim cleared session-PDA rent (0.5-T3)", () =>
     await closeV6(vault, cpB);
 
     // B is GONE; A still live; count 1.
+    // Poll IS the assertion (throws on timeout); no re-read — replica flap.
     await pollUntilGone(provider.connection, b.sessionPda);
-    expect(await provider.connection.getAccountInfo(b.sessionPda)).to.be.null;
     v = await program.account.vault.fetch(vault.vaultPda);
     expect(v.liveSessionCount).to.equal(1);
 
