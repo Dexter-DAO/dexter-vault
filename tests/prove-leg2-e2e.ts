@@ -57,6 +57,7 @@ const RPC = process.env.HELIUS_RPC_URL ?? "";
 const VAULT_PDA_STR = process.env.PROOF_VAULT_PDA ?? "";
 const FACILITATOR_URL = process.env.FACILITATOR_URL ?? "https://x402.dexter.cash";
 const CONSENT_ORIGIN = process.env.CONSENT_ORIGIN ?? "https://dexter.cash";
+const API_ORIGIN = process.env.API_ORIGIN ?? "https://api.dexter.cash";
 const USDC_MAINNET = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 
@@ -72,20 +73,21 @@ function loadKeypair(p: string): Keypair {
   return Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(resolved, "utf8"))));
 }
 
-/** Persisted app-side keys: the REPLACE run must reuse the same seller. */
+/** Persisted app-side keys: the REPLACE run must reuse the same SELLER.
+ *  The SESSION keypair is deliberately FRESH per run — replace is keyed by
+ *  (vault, counterparty), so persisting it buys nothing, and a stale live
+ *  session carrying the same pubkey would make test 3's content-aware wait
+ *  resolve instantly BEFORE Branch taps (the aborted-prior-run trap). */
 function loadOrCreateProofKeys(): { seller: Keypair; session: Keypair } {
+  const session = Keypair.generate();
   if (fs.existsSync(KEYS_FILE)) {
     const raw = JSON.parse(fs.readFileSync(KEYS_FILE, "utf8"));
-    return {
-      seller: Keypair.fromSecretKey(Uint8Array.from(raw.seller)),
-      session: Keypair.fromSecretKey(Uint8Array.from(raw.session)),
-    };
+    return { seller: Keypair.fromSecretKey(Uint8Array.from(raw.seller)), session };
   }
   const seller = Keypair.generate();
-  const session = Keypair.generate();
   fs.writeFileSync(
     KEYS_FILE,
-    JSON.stringify({ seller: Array.from(seller.secretKey), session: Array.from(session.secretKey) }),
+    JSON.stringify({ seller: Array.from(seller.secretKey) }),
     { mode: 0o600 },
   );
   return { seller, session };
@@ -148,6 +150,26 @@ describe("PROVE: leg-2 spend grant end-to-end (mainnet, human in the loop)", fun
     const bal = await getAccount(conn, swigAta).then((a) => a.amount).catch(() => 0n);
     receipt("swigUsdcBefore", bal.toString());
     expect(bal >= CAP, `fund the swig ATA with >= $${Number(CAP) / 1e6} USDC BEFORE granting (overcommit gate)`).to.equal(true);
+
+    // Precondition 1 enforced HERE, not 15 minutes into Branch's tap: the
+    // proof seller must be on the invite list (admin route, Task B6).
+    const inviteRes = await fetch(
+      `${API_ORIGIN}/api/passkey-vault/grants/invite-status?counterparty=${seller.publicKey.toBase58()}`,
+    );
+    const invite = (await inviteRes.json()) as { invited?: boolean };
+    receipt("inviteStatus", invite);
+    expect(
+      invite.invited,
+      `seed the proof seller on the invite list first: POST ${API_ORIGIN}/internal/admin/vault-grant-sponsors`,
+    ).to.equal(true);
+
+    // RUN-SHEET GUARD: a wrong PROOF_VAULT_PDA is the least-discoverable
+    // failure — the consent page registers against Branch's IDENTITY vault
+    // (it never sees this env var), the harness times out in test 3, and a
+    // live grant is stranded on the real vault. Confirm before the taps:
+    // PROOF_VAULT_PDA must equal the vault dexter.cash/tab shows for the
+    // identity Branch will approve with.
+    console.log("watching vault:", vaultPda.toBase58(), "— MUST be the vault Branch's /tab page shows");
   });
 
   it("1. pre-create the seller USDC ATA (the settle route does NOT create it)", async function () {
@@ -270,7 +292,13 @@ describe("PROVE: leg-2 spend grant end-to-end (mainnet, human in the loop)", fun
       after = await fetchSessionAccount(conn, vaultPda, seller.publicKey);
     }
     expect(after!.session.spent).to.equal(cumulative);
-    const sellerAfter = await getAccount(conn, sellerAta).then((a) => a.amount);
+    // Same replica-flap class: poll the seller balance, don't one-shot it.
+    let sellerAfter = await getAccount(conn, sellerAta).then((a) => a.amount);
+    const balDeadline = Date.now() + 30_000;
+    while (sellerAfter - sellerBefore !== delta && Date.now() < balDeadline) {
+      await new Promise((r) => setTimeout(r, 2_000));
+      sellerAfter = await getAccount(conn, sellerAta).then((a) => a.amount);
+    }
     receipt("sellerUsdcDelta", (sellerAfter - sellerBefore).toString());
     expect(sellerAfter - sellerBefore).to.equal(delta);
     receipt("meterAfterSettle", {
@@ -289,7 +317,15 @@ describe("PROVE: leg-2 spend grant end-to-end (mainnet, human in the loop)", fun
       pollIntervalMs: 5_000,
     });
     expect(cleared.version).to.equal(0);
-    const after = await readVaultFull(conn, vaultPda);
+    // THE POLL IS THE ASSERTION (d542e48 lesson): a one-shot vault re-read
+    // after the session poll can hit a lagging replica and fail a fully
+    // successful run at the very last line — poll the decrement instead.
+    const countDeadline = Date.now() + 60_000;
+    let after = await readVaultFull(conn, vaultPda);
+    while (after.liveSessionCount !== before.liveSessionCount - 1 && Date.now() < countDeadline) {
+      await new Promise((r) => setTimeout(r, 2_000));
+      after = await readVaultFull(conn, vaultPda);
+    }
     receipt("liveSessionCount", { before: before.liveSessionCount, after: after.liveSessionCount });
     expect(after.liveSessionCount).to.equal(before.liveSessionCount - 1);
     console.log("\nALL RECEIPTS:", JSON.stringify(receipts, null, 2));
