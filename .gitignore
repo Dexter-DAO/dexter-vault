@@ -19,3 +19,7 @@ test-ledger
 
 # Fleet-migration resumable journal (audit trail; chain is truth)
 scripts/.fleet-migration-journal.jsonl
+
+# Leg-2 e2e proof artifacts (session/seller keys + run receipts stay local)
+tests/.leg2-proof-keys.json
+tests/.leg2-proof-receipts-*.json

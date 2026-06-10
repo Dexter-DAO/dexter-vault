@@ -39,13 +39,15 @@
     bn.js "^5.1.2"
     buffer-layout "^1.2.0"
 
-"@dexterai/vault@^0.4.1":
-  version "0.4.1"
-  resolved "https://registry.npmjs.org/@dexterai/vault/-/vault-0.4.1.tgz"
-  integrity sha512-RUcRNqp2MezYUFrMD/GvdjNsvaiRznCO85rzynIxFlL7vevaeR9a1T88xdBnHNaZQiUcAdpxi2PEBcDYntvQVQ==
+"@dexterai/vault@^0.9.0":
+  version "0.9.0"
+  resolved "https://registry.npmjs.org/@dexterai/vault/-/vault-0.9.0.tgz"
+  integrity sha512-TdvkcRZqH6otFvqGjxXxwYDC/4+jRa8jXKIaasqRtuhpZrWEdw3/oswvkUztYiAUeNJDLNLFegsCmXpPp4tySQ==
   dependencies:
     "@noble/curves" "^1.9.7"
     "@noble/hashes" "^1.8.0"
+    "@solana-program/token" "^0.5.1"
+    "@solana/kit" "^2.3.0"
     "@solana/spl-token" "^0.4.9"
     "@solana/web3.js" "^1.98.0"
     "@swig-wallet/kit" "^1.9.0"
@@ -403,7 +405,7 @@
     "@solana/nominal-types" "6.9.0"
     "@solana/promises" "6.9.0"
 
-"@solana/kit@^2.1.0":
+"@solana/kit@^2.1.0", "@solana/kit@^2.3.0":
   version "2.3.0"
   resolved "https://registry.npmjs.org/@solana/kit/-/kit-2.3.0.tgz"
   integrity sha512-sb6PgwoW2LjE5oTFu4lhlS/cGt/NB3YrShEyx7JgWFWysfgLdJnhwWThgwy/4HjNsmtMrQGWVls0yVBHcMvlMQ==
