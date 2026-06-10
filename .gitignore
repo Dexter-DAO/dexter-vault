@@ -16,3 +16,6 @@ test-ledger
 
 # Local-only SSS security-scan baselines (analysis lives in private dexter-thesis)
 .security-baseline/
+
+# Fleet-migration resumable journal (audit trail; chain is truth)
+scripts/.fleet-migration-journal.jsonl
