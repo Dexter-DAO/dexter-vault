@@ -197,4 +197,11 @@ pub mod dexter_vault {
     ) -> Result<()> {
         instructions::close_standby::handler(ctx, args)
     }
+
+    pub fn close_session(
+        ctx: Context<CloseSession>,
+        args: CloseSessionArgs,
+    ) -> Result<()> {
+        instructions::close_session::handler(ctx, args)
+    }
 }

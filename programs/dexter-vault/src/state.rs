@@ -344,4 +344,6 @@ pub enum VaultError {
     FinancierConsentMissing,
     #[msg("an expired sibling session must be passed WRITABLE so the register-time sweep can clear it")]
     SessionAccountNotWritable,
+    #[msg("session is still live (version != 0); revoke_session_key it before close_session can reclaim its rent")]
+    SessionStillLive,
 }
