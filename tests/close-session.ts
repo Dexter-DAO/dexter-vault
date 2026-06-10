@@ -68,6 +68,32 @@ import {
 } from "./helpers/register-bootstrap";
 import { deriveSessionPda } from "./helpers/session";
 
+
+/**
+ * Poll until getAccountInfo returns null (account reaped after close).
+ * READ-YOUR-WRITES: on the lean Helius plan a confirmed close can take a few
+ * seconds to become visible on the read replica — a single immediate read
+ * races it (proven live 2026-06-10: both close txs SUCCEEDED on-chain while
+ * the immediate read still served the pre-close image). Mirrors the
+ * content-aware visibility waits used for register/revoke.
+ */
+async function pollUntilGone(
+  connection: anchor.web3.Connection,
+  pubkey: anchor.web3.PublicKey,
+  timeoutMs = 60_000,
+): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    const ai = await connection.getAccountInfo(pubkey, "confirmed");
+    if (ai === null) return;
+    if (Date.now() - start > timeoutMs)
+      throw new Error(
+        `account ${pubkey.toBase58()} still visible ${timeoutMs}ms after close (lamports=${ai.lamports})`,
+      );
+    await new Promise((r) => setTimeout(r, 2_000));
+  }
+}
+
 describe("V6 close_session — reclaim cleared session-PDA rent (0.5-T3)", () => {
   const provider = makeTestProvider();
   const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
@@ -239,7 +265,9 @@ describe("V6 close_session — reclaim cleared session-PDA rent (0.5-T3)", () =>
       const sig = await closeV6(vault, counterparty);
 
       // PDA GONE (Anchor close: lamports drained, data resized to 0, owner →
-      // System Program; the runtime reaps the 0-lamport account).
+      // System Program; the runtime reaps the 0-lamport account). Visibility-
+      // polled: the read replica can lag the confirmed close by seconds.
+      await pollUntilGone(provider.connection, sessionPda);
       const postAi = await provider.connection.getAccountInfo(sessionPda);
       expect(postAi, "close_session must remove the PDA").to.be.null;
 
@@ -516,6 +544,7 @@ describe("V6 close_session — reclaim cleared session-PDA rent (0.5-T3)", () =>
     await closeV6(vault, cpB);
 
     // B is GONE; A still live; count 1.
+    await pollUntilGone(provider.connection, b.sessionPda);
     expect(await provider.connection.getAccountInfo(b.sessionPda)).to.be.null;
     v = await program.account.vault.fetch(vault.vaultPda);
     expect(v.liveSessionCount).to.equal(1);
