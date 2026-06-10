@@ -156,6 +156,7 @@ interface Cli {
   payerKeypairPath?: string;
   limit?: number;
   onlyVaults: Set<string>;
+  includeMismatch: boolean;
 }
 
 function parseCli(argv: string[]): Cli {
@@ -163,6 +164,7 @@ function parseCli(argv: string[]): Cli {
     mode: "dry-run",
     authorityKeypairPaths: [],
     onlyVaults: new Set(),
+    includeMismatch: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -187,6 +189,9 @@ function parseCli(argv: string[]): Cli {
         break;
       case "--vault":
         cli.onlyVaults.add(argv[++i]);
+        break;
+      case "--include-mismatch":
+        cli.includeMismatch = true;
         break;
       default:
         throw new Error(`unknown flag: ${a}`);
@@ -661,6 +666,41 @@ async function main(): Promise<void> {
   const recs = await census();
   printCensus(recs);
 
+  // --include-mismatch: admit the two SIMULATION-PROVEN stale-stamp cohorts
+  // (2026-06-10 investigation; both verified repairable by the DEPLOYED
+  // migrate chain via mainnet simulateTransaction):
+  //   - 399 B stamped v4: true V4 payload in a pre-grown V5-size shell, tails
+  //     all-zero. migrate_v4_to_v5 prefix-reads tolerantly; realloc is
+  //     conditional (new_size > old_size is false at 399) so no double-grow.
+  //   - 279 B stamped v4 (born-broken): V6-shaped data under a v4 stamp.
+  //     The v4 decode only works because V6's live_session_count coincides
+  //     positionally with V4's session Option tag — REQUIRE that byte == 0
+  //     (a non-zero count would make the v4 decode over-run and revert; we
+  //     refuse up front instead).
+  // The 305 B/v2 shell is NOT admitted (its authority key is lost).
+  if (cli.includeMismatch) {
+    for (const r of recs) {
+      if (r.cls === "mismatch" && r.versionByte === 4 && r.size === 399) {
+        const p = readPrefix(r.data);
+        r.authority = p.authority;
+        r.session = readActiveSession(r.data, p.afterAuthority);
+        r.walkable = true;
+        r.clsDetail += " — ADMITTED via --include-mismatch (proven V4-in-V5-shell)";
+      } else if (r.cls === "born-broken-279" && r.versionByte === 4) {
+        const p = readPrefix(r.data);
+        if (r.data[p.afterAuthority] !== 0) {
+          console.log(
+            `  REFUSING born-broken ${r.pubkey.toBase58()}: live_session_count=${r.data[p.afterAuthority]} != 0`
+          );
+          continue;
+        }
+        r.authority = p.authority;
+        r.walkable = true;
+        r.clsDetail += " — ADMITTED via --include-mismatch (V6-shaped, lsc=0, walk v4→v5→v6)";
+      }
+    }
+  }
+
   const walkable = recs.filter(
     (r) =>
       r.walkable &&
@@ -853,10 +893,19 @@ async function main(): Promise<void> {
         if (version === 6) break; // done
         if (version < 2 || version > 5)
           throw new Error(`unexpected version byte ${version} mid-walk`);
-        if (data.length === V6_SIZE)
-          throw new Error(
-            `279 B mid-walk with version ${version} — refusing (born-broken shape)`
-          );
+        if (data.length === V6_SIZE) {
+          // Born-broken shape (279 B, stamped v4). Refuse UNLESS the operator
+          // passed --include-mismatch AND live_session_count is 0 — the
+          // simulation-proven repair walk (v4→v5 grows to 399/v5, then v5→v6
+          // shrinks back, correctly stamped). A non-zero count would make the
+          // v4 decode over-run on-chain; we refuse before paying for the tx.
+          const lscOk =
+            cli.includeMismatch && data[readPrefix(data).afterAuthority] === 0;
+          if (!lscOk)
+            throw new Error(
+              `279 B mid-walk with version ${version} — refusing (born-broken shape; rerun with --include-mismatch if intended)`
+            );
+        }
 
         const hopName = HOP_NAMES[version];
         let ix: TransactionInstruction;
