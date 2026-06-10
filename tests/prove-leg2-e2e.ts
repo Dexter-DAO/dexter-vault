@@ -65,8 +65,12 @@ const CAP = 500_000n;          // $0.50 proposed cap
 const OPEN_AMOUNT = 200_000n;  // $0.20 armed
 const SETTLE_DELTA = 100_000n; // $0.10 settled through the facilitator
 
-const KEYS_FILE = path.join(__dirname, ".leg2-proof-keys.json");
-const RECEIPTS_FILE = path.join(__dirname, `.leg2-proof-receipts-${Date.now()}.json`);
+// __dirname is unavailable: mocha reparses this file as an ES module (module
+// syntax detected, no "type" in package.json). The run command cd's to the
+// repo root, so anchor on cwd.
+const TESTS_DIR = path.join(process.cwd(), "tests");
+const KEYS_FILE = path.join(TESTS_DIR, ".leg2-proof-keys.json");
+const RECEIPTS_FILE = path.join(TESTS_DIR, `.leg2-proof-receipts-${Date.now()}.json`);
 
 function loadKeypair(p: string): Keypair {
   const resolved = p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : p;
