@@ -3,11 +3,15 @@
 //! When a browser passkey signs an operation, the authenticator does NOT
 //! sign the raw operation bytes. Per the WebAuthn spec, it signs:
 //!
+//! ```text
 //!     authenticatorData || sha256(clientDataJSON)
+//! ```
 //!
 //! where `clientDataJSON` is a JSON object the browser produces, of the form:
 //!
+//! ```text
 //!     {"type":"webauthn.get","challenge":"<base64url>","origin":"https://dexter.cash",...}
+//! ```
 //!
 //! and `challenge` is the value the relying party (dexter-api) passed to
 //! `navigator.credentials.get({ challenge })`. For our vault, the challenge
@@ -161,7 +165,9 @@ fn introspect_simd_0075(
 /// base64url-decoded bytes. Implementation is a minimal-footprint scanner —
 /// we don't pull in serde_json on chain. Expected payload shape:
 ///
+/// ```text
 ///     {"type":"webauthn.get","challenge":"<base64url>","origin":"...",...}
+/// ```
 ///
 /// Field order is not guaranteed by the WebAuthn spec, but each value is
 /// always a JSON string. We scan for `"challenge":"` and read until the

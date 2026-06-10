@@ -15,6 +15,7 @@ pub mod migrate_v2_to_v3;
 pub mod migrate_v3_to_v4;
 pub mod migrate_v4_to_v5;
 pub mod migrate_v5_to_v6;
+pub mod migrate_legacy_to_v6;
 pub mod lock_voucher;
 pub mod transfer_lock_ownership;
 pub mod settle_locked_voucher;
@@ -69,6 +70,8 @@ pub use migrate_v3_to_v4::*;
 pub use migrate_v4_to_v5::*;
 #[allow(ambiguous_glob_reexports)]
 pub use migrate_v5_to_v6::*;
+#[allow(ambiguous_glob_reexports)]
+pub use migrate_legacy_to_v6::*;
 #[allow(ambiguous_glob_reexports)]
 pub use lock_voucher::*;
 #[allow(ambiguous_glob_reexports)]

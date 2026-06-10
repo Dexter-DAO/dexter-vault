@@ -346,4 +346,6 @@ pub enum VaultError {
     SessionAccountNotWritable,
     #[msg("session is still live (version != 0); revoke_session_key it before close_session can reclaim its rent")]
     SessionStillLive,
+    #[msg("account is not a recognized pre-version-byte legacy vault (expected exactly 151-byte V1 or 183-byte V1.5 with the Vault discriminator)")]
+    NotALegacyVault,
 }

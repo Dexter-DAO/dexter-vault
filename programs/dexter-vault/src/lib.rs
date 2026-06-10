@@ -128,6 +128,13 @@ pub mod dexter_vault {
         instructions::migrate_v5_to_v6::handler_with_session(ctx, args)
     }
 
+    pub fn migrate_legacy_to_v6(
+        ctx: Context<MigrateLegacyToV6>,
+        args: MigrateLegacyToV6Args,
+    ) -> Result<()> {
+        instructions::migrate_legacy_to_v6::handler(ctx, args)
+    }
+
     pub fn lock_voucher(
         ctx: Context<LockVoucher>,
         args: LockVoucherArgs,
