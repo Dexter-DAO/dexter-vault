@@ -268,10 +268,9 @@ describe("revolving-meter: version", () => {
   const workspaceProgram = anchor.workspace.DexterVault as Program<DexterVault>;
   const program = new anchor.Program<DexterVault>(workspaceProgram.idl, provider);
   it("registerSessionWithCapacity vault is V6", async () => {
-    // V6: registerSessionWithCapacity now migrates the vault to V6 (the
-    // settle_voucher increment path gates on VAULT_VERSION_V6). The old
-    // "fresh vault is V3" assertion no longer holds — the bootstrap migrates
-    // V4 → V5 → V6 before registration.
+    // V6: the settle_voucher increment path gates on VAULT_VERSION_V6.
+    // initialize_vault now stamps V6 at birth, so the bootstrap's migration
+    // walk is a version-aware no-op — the vault reads 6 either way.
     const ctx = await registerSessionWithCapacity(program, provider, {
       maxAmount: 10_000_000, maxRevolvingCapacity: 2_000_000,
     });
@@ -283,9 +282,9 @@ describe("revolving-meter: migration", () => {
   // IDL-presence / args-shape test ONLY — deliberately does NOT run on-chain.
   //
   // Why no end-to-end run: a "V2 vault" is the OLD (16-bytes-shorter) layout.
-  // This test binary initializes vaults through the CURRENT program, which
-  // writes V3 (initialize_vault sets VAULT_VERSION_V3). There is no honest way
-  // to mint a genuine V2 account from a V3-initializing program, so we do NOT
+  // This test binary initializes vaults through the CURRENT program (which
+  // now stamps V6 at birth; it stamped V3 when this test was written). There
+  // is no honest way to mint a genuine V2 account from this program, so we do NOT
   // fake one. Full migration verification (discriminator check, version-byte
   // gate, +16-byte realloc, trailing zero-fill landing current_outstanding=0 +
   // max_revolving_capacity=0, version 2->3) is exercised post-deploy against

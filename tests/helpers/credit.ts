@@ -119,12 +119,24 @@ export function buildOpenStandbyMessage(
 /**
  * (b) Migrate a V4 vault to V5 via migrate_v4_to_v5, then poll until the
  * on-chain `version` field reads 5.
+ *
+ * VERSION-AWARE: initialize_vault now stamps fresh vaults V6 directly, so a
+ * just-bootstrapped vault has NOTHING for this hop to do — migrate_v4_to_v5
+ * requires version == 4 and would revert UnsupportedVaultVersion. If the vault
+ * already reads >= 5 this is a no-op (the hop is already satisfied; credit
+ * instructions gate on V5 || V6, so a V6 vault needs no V5 stop). Callers that
+ * truly hold a V4 vault (pre-fix mainnet accounts) still walk the migration.
  */
 export async function migrateVaultToV5(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
   vaultPda: PublicKey,
 ): Promise<void> {
+  // Raw version byte (data[8], after the 8-byte discriminator) — NOT the IDL
+  // decoder, which can't parse pre-V6 layouts (Option<SessionRegistration> in
+  // the middle of the struct).
+  const info = await provider.connection.getAccountInfo(vaultPda);
+  if (info && info.data.length > 8 && info.data[8] >= 5) return; // hop already satisfied
   // migrate is safe to resend on a CONFIRMED transient drop: the resend either
   // lands (it truly dropped) or reverts because the vault is already V5 — and the
   // trailing pollUntilAccount(version==5) is the source of truth either way. Build
@@ -160,12 +172,19 @@ export async function migrateVaultToV5(
  * the V6 multi-session model has no legacy active_session to lift), then poll
  * until the on-chain `version` field reads 6. Chain this AFTER migrateVaultToV5
  * (V4 → V5 → V6) to land a vault the V6 register_session_key gate accepts.
+ *
+ * VERSION-AWARE: initialize_vault now stamps fresh vaults V6 directly, so on a
+ * just-bootstrapped vault this is a no-op (already at the target). Only
+ * genuine V5 waypoint vaults (pre-fix accounts mid-chain) still migrate.
  */
 export async function migrateVaultToV6(
   program: Program<DexterVault>,
   provider: anchor.AnchorProvider,
   vaultPda: PublicKey,
 ): Promise<void> {
+  // Raw version byte (data[8]) — see migrateVaultToV5 for why not the IDL decoder.
+  const info = await provider.connection.getAccountInfo(vaultPda);
+  if (info && info.data.length > 8 && info.data[8] >= 6) return; // already at target
   // Same self-heal pattern as migrateVaultToV5: route through
   // sendAndConfirmWithRetry (dropped send re-sends on a fresh blockhash), and
   // treat a revert-after-landed (vault already V6) as success via the poll.
@@ -191,8 +210,10 @@ export async function migrateVaultToV6(
 }
 
 /**
- * (c) Enroll a FINANCIER credit vault: bootstrap a V4 vault with the
- * draw_credit ProgramExec marker on role 1, then migrate it to V5.
+ * (c) Enroll a FINANCIER credit vault: bootstrap a vault (born V6 since the
+ * init fix; the trailing version-aware migrate-to-V5 hop is a no-op on it and
+ * only fires for genuine pre-fix V4 accounts) with the draw_credit ProgramExec
+ * marker on role 1. Credit instructions gate on V5 || V6, so both land usable.
  *
  * Marker placement rationale: draw_credit's SignV2 spends the FINANCIER's
  * swig_wallet ATA, so the draw_credit discriminator MUST be a ProgramExec

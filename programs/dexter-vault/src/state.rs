@@ -15,17 +15,21 @@ pub const VAULT_VERSION_V3: u8 = 3;
 /// V4 appends LockedClaim accounting: three u64s to `Vault`
 /// (`outstanding_locked_amount`, `total_crystallized_amount`, `total_settled_amount`)
 /// and `crystallized_cumulative: u64` + `last_locked_sequence: u32` to
-/// `SessionRegistration`. Enlarges `Vault::INIT_SPACE`. New vaults init as V4.
+/// `SessionRegistration`. Enlarges `Vault::INIT_SPACE`. Historical init
+/// version (new vaults initialized as V4 through the V4-era builds).
 pub const VAULT_VERSION_V4: u8 = 4;
 
 /// V5 appends credit accounting: external-financier standby backing.
-/// `borrowed` is the "buyer is negative" accumulator. New vaults init as V4;
-/// V5 is reached only by migration (migrate_v4_to_v5), never at init.
+/// `borrowed` is the "buyer is negative" accumulator. V5 is a migration
+/// waypoint only (migrate_v4_to_v5) — never an init version.
 pub const VAULT_VERSION_V5: u8 = 5;
 
 /// V6 moves sessions OUT of the Vault into per-counterparty SessionAccount PDAs.
 /// The Vault loses `active_session` (the Option) and gains `live_session_count: u8`.
-/// New vaults still init as V4; V6 is reached only by migration (migrate_v5_to_v6).
+/// CURRENT init version: initialize_vault writes the V6 layout and stamps V6
+/// directly. Pre-existing vaults reach V6 via migration (migrate_v5_to_v6).
+/// (The V6-era builds before this fix wrote the V6 LAYOUT but stamped V4 —
+/// the "born-broken" cohort, since repaired by the admit-mismatch migration.)
 pub const VAULT_VERSION_V6: u8 = 6;
 
 /// SessionAccount layout version. ZERO on a freshly-created (runtime-zeroed)

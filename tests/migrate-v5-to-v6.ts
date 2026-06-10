@@ -36,11 +36,18 @@
 // ---------------
 // Unlike migrate-v3-to-v4 (which targeted pre-existing mainnet V3 vaults), there
 // are no pre-existing V5 vaults under the current program to target — V5 is a
-// transient migration waypoint. So each case BOOTSTRAPS a fresh V5 vault under
-// the provider wallet (which becomes its dexter_authority) via
-// bootstrapForRegister(migrateTo:5). That leaves active_session = None — which is
-// exactly the no-session migration path (case 19). The with-session path (case
-// 20) is NOT constructible through the V6 build — see its note.
+// transient migration waypoint. Each case originally BOOTSTRAPPED a fresh V5
+// vault via bootstrapForRegister(migrateTo:5) (init-as-V4 → migrate_v4_to_v5).
+//
+// BORN-V6 UPDATE: initialize_vault now stamps fresh vaults V6 directly, so
+// that construction path is GONE — migrate_v4_to_v5 requires version == 4 and
+// a fresh vault is born 6 (the version-aware migrate helpers simply no-op).
+// A V5-stamped vault is therefore UNCONSTRUCTIBLE on this build, exactly like
+// case 20's with-session precondition always was. Cases 19/21/22 are marked
+// it.skip with that rationale (the matrix WAS run green on mainnet against the
+// pre-fix build — the proof exists; it just can't be re-staged from scratch).
+// Future re-coverage belongs in program-crate Rust unit tests with raw V5
+// fixtures, same as case 20.
 
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
@@ -302,8 +309,10 @@ const runProof = process.env.RUN_MIGRATION_PROOF === "1";
     const signer = provider.wallet.publicKey;
 
     // Stand up a fresh V5 vault under the provider wallet (its dexter_authority).
-    // bootstrapForRegister(migrateTo:5) runs initialize_vault → swig → set_swig →
-    // fund → migrate_v4_to_v5, leaving active_session = None (no V6 register ran).
+    // DEAD on the born-V6 build: initialize_vault stamps V6, the version-aware
+    // migrate hop no-ops, and this returns a V6 vault — so every case that
+    // calls it is it.skip'd (see the BORN-V6 UPDATE header note). Kept for the
+    // historical record of how the green mainnet run staged its V5 inputs.
     async function standUpV5NoSession(): Promise<PublicKey> {
       const ready = await bootstrapForRegister(program, provider, {
         usdcFundingAmount: 1_000_000n, // $1 — funding is irrelevant to migration
@@ -318,7 +327,7 @@ const runProof = process.env.RUN_MIGRATION_PROOF === "1";
     //     migrate_v5_to_v6, assert version==6, live_session_count==0, NO session
     //     PDA created, every carried field preserved bit-for-bit.
     // ─────────────────────────────────────────────────────────────────────────
-    it("case 19 — V5 None-session vault migrates to V6: version 6, live_session_count 0, all carried fields bit-for-bit", async () => {
+    it.skip("case 19 — V5 None-session vault migrates to V6 [UNCONSTRUCTIBLE on the born-V6 build: init stamps V6, so no fresh V5 vault can be staged; proven green on mainnet against the pre-fix build]", async () => {
       const vaultPda = await standUpV5NoSession();
 
       // (1) PRE: raw-decode the still-V5 (399-byte) account.
@@ -464,7 +473,7 @@ const runProof = process.env.RUN_MIGRATION_PROOF === "1";
     //     After case-19-style migration the vault is V6; the data[8]==VAULT_VERSION_V5
     //     guard rejects re-running migrate_v5_to_v6.
     // ─────────────────────────────────────────────────────────────────────────
-    it("case 21 — re-running migrate on a V6 vault reverts UnsupportedVaultVersion", async () => {
+    it.skip("case 21 — re-running migrate on a V6 vault reverts UnsupportedVaultVersion [UNCONSTRUCTIBLE precondition on the born-V6 build (needs a fresh V5 vault for the FIRST migrate); proven green on mainnet against the pre-fix build]", async () => {
       const vaultPda = await standUpV5NoSession();
 
       // First migration: V5 → V6 (succeeds).
@@ -507,7 +516,7 @@ const runProof = process.env.RUN_MIGRATION_PROOF === "1";
     //     NOTE: dexter_authority is a Signer in the struct, so the wrong-authority
     //     keypair must actually sign — we pass it as an extra signer.
     // ─────────────────────────────────────────────────────────────────────────
-    it("case 22 — wrong dexter_authority signer reverts (PasskeyVerificationFailed, the authority gate)", async () => {
+    it.skip("case 22 — wrong dexter_authority signer reverts (PasskeyVerificationFailed, the authority gate) [UNCONSTRUCTIBLE precondition on the born-V6 build (needs a fresh V5 vault); proven green on mainnet against the pre-fix build]", async () => {
       const vaultPda = await standUpV5NoSession();
 
       const wrongAuthority = Keypair.generate();

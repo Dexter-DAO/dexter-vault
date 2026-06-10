@@ -68,8 +68,11 @@ pub struct RegisterSessionKey<'info> {
     pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
-    // remaining_accounts: all OTHER live sibling SessionAccounts, strict ascending
-    // order, read-only — consumed by the overcommit gate in the handler (Task 5).
+    // remaining_accounts: ALL OTHER sibling SessionAccounts (live AND expired),
+    // strict ascending order — consumed by the overcommit gate in the handler.
+    // Expired siblings MUST be writable (the gate sweeps them: version→0 +
+    // zeroed scope, persisted via Account::exit); live siblings may be
+    // read-only, though passing everything writable (as the SDK does) is fine.
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize)]

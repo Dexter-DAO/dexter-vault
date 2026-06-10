@@ -5,7 +5,8 @@
 // enforces the overcommit invariant against `vault_usdc_ata.amount`. That
 // means every test that registers a session MUST first stand up:
 //
-//   1. a V4 vault bound to a fresh passkey
+//   1. a vault bound to a fresh passkey (born V6 — initialize_vault stamps
+//      VAULT_VERSION_V6 directly since the born-broken fix)
 //   2. a real Swig (role 0 manageAuthority + role 1 ProgramExec marker)
 //   3. set_swig binding vault ↔ swig
 //   4. a mint + a swig-wallet-owned source ATA, optionally funded
@@ -166,20 +167,22 @@ export interface BootstrapOpts {
    *  with this Mint" (0x3), because two vaults would otherwise hold ATAs on two
    *  different mints. Real credit is same-token (USDC); this mirrors that. */
   mint?: PublicKey;
-  /** Target vault version after init. Default `4` = legacy behavior (the vault
-   *  is left at V4, exactly as before — existing V4/V5 callers are unaffected).
-   *  `5` migrates V4 → V5. `6` migrates V4 → V5 → V6 (required for the V6
-   *  register_session_key gate, which now reads VAULT_VERSION_V6). The migrate
-   *  helpers live in ./credit; importing them at call-time keeps this additive. */
+  /** Target vault version after init. NOTE: initialize_vault now stamps fresh
+   *  vaults V6 directly (the born-broken fix), so EVERY value of this option
+   *  yields a V6 vault — the migrate helpers are version-aware and skip hops
+   *  already satisfied (migrate_v4_to_v5 / migrate_v5_to_v6 only fire on
+   *  genuine pre-fix V4/V5 accounts, which a fresh bootstrap never is). The
+   *  option is kept so existing call sites compile unchanged; a fresh-V5 or
+   *  fresh-V4 vault is NO LONGER CONSTRUCTIBLE through this path. */
   migrateTo?: 4 | 5 | 6;
 }
 
 /**
- * Provision a V4 vault, stand up the real Swig (role 0 + role 1 ProgramExec),
- * bind via `set_swig`, mint a USDC-parity token, create + fund the swig-
- * wallet-owned source ATA. After this returns, `register_session_key` will
- * have its three new accounts available and `vault_usdc_ata.amount` set to
- * `usdcFundingAmount`.
+ * Provision a vault (born V6), stand up the real Swig (role 0 + role 1
+ * ProgramExec), bind via `set_swig`, mint a USDC-parity token, create + fund
+ * the swig-wallet-owned source ATA. After this returns,
+ * `register_session_key` will have its three new accounts available and
+ * `vault_usdc_ata.amount` set to `usdcFundingAmount`.
  */
 export async function bootstrapForRegister(
   program: Program<DexterVault>,
@@ -360,11 +363,13 @@ export async function bootstrapForRegister(
     );
   }
 
-  // ── Optional version migration. Default (migrateTo === undefined || 4) leaves
-  //    the vault at V4 — IDENTICAL to the pre-existing behavior, so every current
-  //    V4/V5 caller is untouched. migrateTo 5 → V4→V5; migrateTo 6 → V4→V5→V6.
-  //    The migrate helpers live in ./credit; we import them at call-time (dynamic
-  //    import) to avoid a static circular import (credit.ts imports from here).
+  // ── Optional version migration. initialize_vault stamps V6 directly now, so
+  //    on a fresh bootstrap BOTH hops are version-aware no-ops (the helpers read
+  //    the raw version byte and skip hops already satisfied). The walk is kept
+  //    so this helper still works if it's ever pointed at a genuine pre-fix
+  //    V4/V5 account. The migrate helpers live in ./credit; we import them at
+  //    call-time (dynamic import) to avoid a static circular import (credit.ts
+  //    imports from here).
   const migrateTo = opts.migrateTo ?? 4;
   if (migrateTo >= 5) {
     const { migrateVaultToV5, migrateVaultToV6 } = await import("./credit");

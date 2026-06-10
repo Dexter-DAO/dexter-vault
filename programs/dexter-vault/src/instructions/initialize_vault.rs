@@ -45,8 +45,18 @@ pub fn handler(ctx: Context<InitializeVault>, args: InitializeVaultArgs) -> Resu
         VaultError::PasskeyVerificationFailed
     );
 
+    // Stamp the version the account is actually SHAPED as. The account Anchor
+    // just init'd is the V6 layout (live_session_count, no inline
+    // active_session), so byte 0 must say 6 — stamping anything older mints a
+    // "born-broken" vault that every V6-gated instruction rejects and the
+    // migration chain can't repair without a special-case admit. (This handler
+    // stamped V4 through 1.x and minted 12 such vaults on mainnet.)
+    //
+    // Every field of the V6 struct is initialized EXPLICITLY below, in struct
+    // order, even though Anchor's `init` zero-fills the account — so the
+    // handler is self-evidently complete against state.rs::Vault.
     let vault = &mut ctx.accounts.vault;
-    vault.version = VAULT_VERSION_V4;
+    vault.version = VAULT_VERSION_V6;
     vault.bump = ctx.bumps.vault;
     vault.passkey_pubkey = args.passkey_pubkey;
     vault.swig_address = Pubkey::default();
@@ -55,6 +65,16 @@ pub fn handler(ctx: Context<InitializeVault>, args: InitializeVaultArgs) -> Resu
     vault.pending_withdrawal = None;
     vault.identity_claim = args.identity_claim;
     vault.dexter_authority = ctx.accounts.dexter_authority.key();
+    // V6: no session PDAs exist yet for a fresh vault.
     vault.live_session_count = 0;
+    // V4 LockedClaim odometers: all zero at birth.
+    vault.outstanding_locked_amount = 0;
+    vault.total_crystallized_amount = 0;
+    vault.total_settled_amount = 0;
+    // V5 credit fields: neutral — no financier, nothing borrowed, no deadline.
+    vault.borrowed = 0;
+    vault.standby_backer = None;
+    vault.standby_cap = 0;
+    vault.borrow_recovery_at = None;
     Ok(())
 }
