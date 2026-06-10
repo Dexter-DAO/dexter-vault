@@ -239,7 +239,15 @@ describe("PROVE: leg-2 spend grant end-to-end (mainnet, human in the loop)", fun
       [payer, master],
     );
     receipt("openTabTx", sig);
-    const after = await fetchSessionAccount(conn, vaultPda, seller.publicKey);
+    // THE POLL IS THE ASSERTION: a one-shot read right after confirm can hit a
+    // lagging replica before the increment is visible (observed live: read 0
+    // while the tab was in fact armed — settle then carried the outstanding).
+    let after = await fetchSessionAccount(conn, vaultPda, seller.publicKey);
+    const deadline = Date.now() + 30_000;
+    while (after!.session.currentOutstanding !== arm && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2_000));
+      after = await fetchSessionAccount(conn, vaultPda, seller.publicKey);
+    }
     receipt("outstandingAfterOpen", after!.session.currentOutstanding.toString());
     expect(after!.session.currentOutstanding).to.equal(arm);
   });
